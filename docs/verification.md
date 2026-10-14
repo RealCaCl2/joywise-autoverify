@@ -3,6 +3,27 @@
 > 本文件区分本地验证与真实校园网 / OpenWrt 实测；本地结果不代表设备验收。
 > 复现命令和验证范围见各条目自身。
 
+## 2026-10-14：r17 APK 构建与 OpenWrt 升级
+
+- 复用 WSL OpenWrt 25.12.5 ramips/mt7621 SDK，`bash tools/build-apk.sh`
+  构建成功；产物为 `dist/autoverify-1.0.0-r17.apk`（42,869 字节，noarch）。
+  APK 元数据确认版本与五项依赖，上传前后 SHA256 一致：
+  `29aa48c806fcb077a35f7c51fb4a062e513d7621e0b9b7aaeeb42924ba9bd6eb`。
+- 用户授权通过已有密码环境变量连接路由器；使用已保存的 SSH 主机密钥验证身份。
+  设备为 Xiaomi Mi Router 4A Gigabit Edition v2，OpenWrt 25.12.5 ramips/mt7621。
+- 升级前将相关 UCI 配置及已有 DNS 备份保存在路由器本机，目录权限受 `umask 077`
+  保护。备份路径由 `/root/autoverify-last-backup` 指向；没有下载账号或密码。
+- `apk add --allow-untrusted /tmp/autoverify-1.0.0-r17.apk` 完成 r16 → r17 升级。
+  修改运行模式前使用 `cmp` 确认原 `/etc/config/autoverify` 完整保留。
+- 设置 `dns.enabled=1`、`dns.redirect=0`，应用配置、重启 autoverify 并重载 rpcd。
+  13 个运行文件的 SHA256 与源码匹配（排除保留的配置和已执行的 uci-defaults）。
+- 实机核验：UCI 和 nft 均没有插件 LAN DNS 重定向；所有 dnsmasq 实例使用
+  `noresolv=1` 和 `127.0.0.1#5053`；代理 `force_dns=0`，自动 dnsmasq 更新关闭。
+  本机 UDP 5053 监听存在，向 127.0.0.1 查询 example.com 返回 A / AAAA，
+  autoverify 服务运行，`autoverify validate` 通过且无警告。
+- 未执行：电脑私有 Clash 客户端连接、真实 LuCI 浏览器验收与出站抓包。
+  DNS 查询成功不等于这些用户端项目已经验收；没有推送或发布。
+
 ## 2026-10-14：DoH 与 LAN DNS 接管拆分（本地验证）
 
 - 默认 `dns.enabled=1`、`dns.redirect=0`；旧配置缺少接管开关时也按关闭处理。
