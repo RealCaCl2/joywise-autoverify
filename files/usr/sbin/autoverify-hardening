@@ -20,6 +20,10 @@ AV_LIB="${AV_LIB:-/usr/lib/autoverify/cfg.sh}"
 # shellcheck disable=SC1090
 [ -r "$AV_LIB" ] || { printf 'autoverify-hardening: 找不到 %s\n' "$AV_LIB" >&2; exit 1; }
 . "$AV_LIB"
+AV_DNS_LIB="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
+# shellcheck disable=SC1090
+[ -r "$AV_DNS_LIB" ] || { printf 'autoverify-hardening: 找不到 %s\n' "$AV_DNS_LIB" >&2; exit 1; }
+. "$AV_DNS_LIB"
 
 APPLY=/usr/sbin/autoverify-apply
 NFT_FILE=/etc/nftables.d/20-ttl-normalize.nft
@@ -75,6 +79,12 @@ status)
 	printf '  TTL 归一化 : %s  值=%s\n' "$(_bool ttl)" "$(av_cfg ttl ttl 64)"
 	printf '  NTP 收敛   : %s\n' "$(_bool ntp)"
 	printf '  DNS 收敛   : %s\n' "$(_bool dns)"
+	if dns_doh_url; then
+		printf '  DoH 上游   : %s (%s)\n' "$_doh_url" "$_doh_provider"
+		printf '  Bootstrap  : %s (仅 DoH 服务域名)\n' "$_doh_bootstrap"
+	else
+		echo '  DoH 上游   : 配置无效'
+	fi
 	printf '  DHCP 伪装  : %s  主机名=%s 厂商=%s\n' "$(_bool dhcp)" \
 		"$(av_cfg dhcp hostname "(留空, 首次应用时生成)")" "$(av_cfg dhcp vendorid "(OpenWrt 默认)")"
 	printf '  IPv6 防护  : %s\n' "$(_bool ipv6)"
@@ -92,6 +102,7 @@ status)
 			echo "  ⚠️  检测到 flowtable(流量卸载), TTL 规则会漏掉被卸载的连接"
 	fi
 	printf '  dnsmasq 53 : %s 个 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE ':53[[:space:]]')"
+	printf '  DoH 代理   : %s 个 127.0.0.1:5053 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE '127\.0\.0\.1:5053[[:space:]]')"
 	printf '  ntpd 123   : %s 个 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE ':123[[:space:]]')"
 	# DHCP 伪装与 IPv6 防护落在 network / dhcp 两个包自己的配置里,
 	# 所以要看的不是 UCI 开关而是系统里实际生效的值。

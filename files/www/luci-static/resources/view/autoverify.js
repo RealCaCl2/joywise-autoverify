@@ -49,8 +49,8 @@ var callServiceList = rpc.declare({
  * 带 fallback 写死浅色会在暗色主题下变成一块突兑的浅色。
  * 状态色用饱和填充 + 白字, 在亮/暗两种主题下都保持对比度。 */
 var STYLE = [
-	'.av-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.6em;margin:.6em 0}',
-	'.av-card{border:1px solid rgba(127,127,127,.35);border-radius:5px;padding:.5em .7em;min-width:0}',
+	'.av-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75em;margin:.75em 0}',
+	'.av-card{border:1px solid rgba(127,127,127,.3);border-radius:8px;padding:.8em 1em;min-width:0}',
 	'.av-card-label{font-size:.8em;opacity:.7;margin-bottom:.2em}',
 	'.av-card-value{font-size:1em;line-height:1.5;word-break:break-word}',
 	'.av-badge{display:inline-block;padding:.05em .5em;border-radius:10px;font-size:.85em;color:#fff;white-space:nowrap}',
@@ -60,6 +60,19 @@ var STYLE = [
 	 * (.cbi-value{padding:0 1rem}) 撑出来的。所以自定义面板的内容块要自己留边距,
 	 * 否则卡片与按钮会紧贴左右两边。数值跟随主题自己的表单行。 */
 	'.av-body{padding:0 1rem}',
+	'.av-header{display:flex;align-items:center;justify-content:space-between;gap:1em;padding:.8em 1rem;flex-wrap:wrap}',
+	'.av-header h3{margin:0}.av-header p{margin:.25em 0 0}',
+	'.av-details{margin:.9em 0;border-top:1px solid rgba(127,127,127,.25);padding-top:.7em}',
+	'.av-details summary{cursor:pointer;font-weight:600;padding:.25em 0}',
+	'.av-notice{border-left:3px solid #4488aa;padding:.75em 1em;line-height:1.65;margin:.5em 0}',
+	'.av-route{display:flex;align-items:center;flex-wrap:wrap;gap:.5em;margin:.6em 0}',
+	'.av-route span{border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:.25em .65em}',
+	'.av-dns-summary{line-height:1.7;overflow-wrap:anywhere}.av-dns-summary strong{display:block}',
+	'.av-actions .av-row{margin:.5em 0 1em}.av-actions button{min-height:2.5em}',
+	'.av-page .cbi-tabmenu{display:flex;flex-wrap:wrap;gap:.25em}',
+	'.av-actions button:disabled{opacity:.55;cursor:wait}',
+	'.av-page details>summary:focus-visible,.av-page button:focus-visible{outline:2px solid #4488aa;outline-offset:3px}',
+	'@media(max-width:600px){.av-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.av-card{padding:.65em}.av-actions .av-row{display:grid;grid-template-columns:1fr}.av-actions button{width:100%}}',
 	'.av-group{font-weight:600;font-size:.9em;opacity:.8;margin:.9em 0 .35em}',
 	'.av-row{display:flex;flex-wrap:wrap;gap:.5em;align-items:center}',
 	'.av-out{white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow:auto;',
@@ -157,6 +170,9 @@ return view.extend({
 		var service = L.resolveDefault(callServiceList('autoverify'), null);
 
 		return Promise.all([ status, service ]).then(function(r) {
+			var details = node.querySelector('.av-details');
+			if (details)
+				self._detailsOpen = details.open;
 			dom.content(node, self.renderStatus(r[0], r[1]));
 		}).catch(function(err) {
 			dom.content(node, self.renderStatusError(err));
@@ -174,7 +190,7 @@ return view.extend({
 			daemonNode = badge('av-ok', daemon.pid != null
 				? _('运行中 (PID %d)').format(daemon.pid) : _('运行中'));
 		else
-			daemonNode = badge('av-bad', _('未运行'));
+			daemonNode = badge(serviceEnabled ? 'av-bad' : 'av-idle', _('未运行'));
 
 		switch (d.probe) {
 		case 'online':  probeNode = badge('av-ok', _('在线')); break;
@@ -206,12 +222,15 @@ return view.extend({
 			card(_('服务开关'), serviceEnabled
 				? badge('av-ok', _('已启用')) : badge('av-idle', _('已禁用'))),
 			card(_('守护进程'), daemonNode),
-			card(_('最近结果'), [ resultBadge(d.result), ' ', E('span', {}, fmtText(d.state)) ]),
+			card(_('最近任务'), resultBadge(d.result)),
+			card(_('WAN'), wanText)
+		];
+		var details = [
+			card(_('任务阶段'), fmtText(d.state)),
 			card(_('最近错误'), errText),
 			card(_('触发来源'), '%s · %s'.format(fmtText(d.source), fmtText(d.operation))),
 			card(_('认证锁'), lockBadge(d.lock_state)),
 			card(_('本次连通性'), probeNode),
-			card(_('WAN'), wanText),
 			card(_('门户'), portalText),
 			card(_('最近一次'), lastText),
 			card(_('下次重试'), fmtTime(d.next_retry_at)),
@@ -220,9 +239,12 @@ return view.extend({
 
 		return [
 			E('div', { 'class': 'av-grid' }, cards),
+			E('details', { 'class': 'av-details', 'open': this._detailsOpen ? '' : null }, [
+				E('summary', {}, _('连接与任务详情')),
+				E('div', { 'class': 'av-grid' }, details)
+			]),
 			E('div', { 'class': 'av-hint' },
-				_('状态每 %d 秒刷新一次，来自 autoverify status --json（只读，不发起探测），' +
-				  '守护进程状态取自 procd。需要一次真实探测时请使用下方的“检测连通性”。')
+				_('每 %d 秒自动刷新。此处不主动探测网络；需要确认在线状态时，请点击“检测连通性”。')
 					.format(STATUS_INTERVAL)),
 			daemon == null ? E('div', { 'class': 'av-hint' },
 				_('读不到 procd 的实例状态，守护进程一栏显示为未知。')) : E([])
@@ -263,6 +285,7 @@ return view.extend({
 
 		this._actionBusy = true;
 		var self = this;
+		(this._actionButtons || []).forEach(function(button) { button.disabled = true; });
 		return fs.exec(cmd, args).then(function(res) {
 			var out = ((res.stdout || '') + (res.stderr || '')).replace(/\s+$/, '');
 			var body = out || _('(命令没有产生输出)');
@@ -273,7 +296,7 @@ return view.extend({
 					res.code === 0 ? badge('av-ok', String(res.code)) : badge('av-warn', String(res.code))
 				]),
 				hint ? E('div', { 'class': 'av-hint' }, hint) : E([]),
-				E('pre', { 'class': 'av-out', 'style': 'margin-top:.6em' }, body),
+				E('pre', { 'class': 'av-out', 'tabindex': '0', 'aria-label': _('命令输出') }, body),
 				E('div', { 'class': 'right' }, [
 					E('button', { 'class': 'btn', 'click': ui.hideModal }, _('关闭'))
 				])
@@ -283,34 +306,54 @@ return view.extend({
 				E('p', _('执行失败: %s').format(err && err.message ? err.message : err)), 'error');
 		}).then(function() {
 			self._actionBusy = false;
+			(self._actionButtons || []).forEach(function(button) { button.disabled = false; });
+			if (self._statusBody)
+				return self.pollStatus(self._statusBody);
 		});
 	},
 
 	/* 操作区里的一个按钮。集中构造, 避免每个按钮重复一大段属性。 */
 	actionButton: function(label, style, cmd, args, title, hint) {
-		return E('button', {
+		var button = E('button', {
 			'class': 'btn cbi-button ' + style,
+			'type': 'button',
 			'click': ui.createHandlerFn(this, 'handleAction', cmd, args, title, hint)
 		}, label);
+		(this._actionButtons || (this._actionButtons = [])).push(button);
+		return button;
+	},
+
+	renderDnsSummary: function(provider, section) {
+		var presets = {
+			tencent: [ _('腾讯云 DNSPod'), 'https://doh.pub/dns-query', '119.29.29.29' ],
+			aliyun: [ _('阿里云公共 DNS'), 'https://dns.alidns.com/dns-query', '223.5.5.5,223.6.6.6' ]
+		};
+		var preset = presets[provider];
+		if (!preset) {
+			var url = section.formvalue('dns', 'doh_url') || uci.get('autoverify', 'dns', 'doh_url');
+			// URL 可能含服务令牌，摘要只显示 host，完整值保留在输入框中。
+			var host = /^https:\/\/([^/]+)/.exec(url || '');
+			return [ E('strong', {}, _('自定义 DoH 服务')),
+				E('div', {}, host ? host[1] : _('请填写下方的 HTTPS 地址和 Bootstrap DNS。')) ];
+		}
+		return [ E('strong', {}, preset[0]), E('div', {}, preset[1]),
+			E('div', { 'class': 'av-hint' }, _('Bootstrap：%s（仅解析服务域名）').format(preset[2])) ];
 	},
 
 	render: function() {
 		var self = this, m, s, o, ss;
+		this._actionButtons = [];
 
 		/* ------------------------------------------------------ 状态概览 --- */
 		/* statusBody 的 class 不会被 dom.content 改掉(它只换子节点), 所以内边距放它身上。 */
 		var statusBody = E('div', { 'class': 'av-body' }, E('em', {}, _('正在读取运行状态…')));
 		var statusPanel = E('div', { 'class': 'cbi-section' }, [
-			E('h3', _('运行状态')),
+			E('div', { 'class': 'av-header' }, [
+				E('div', {}, [ E('h3', _('运行概览')), E('p', { 'class': 'av-hint' }, _('服务、最近任务与出口接口')) ]),
+				E('button', { 'class': 'btn cbi-button cbi-button-neutral', 'type': 'button',
+					'click': ui.createHandlerFn(this, 'handleRefresh', statusBody) }, _('刷新状态'))
+			]),
 			statusBody,
-			E('div', { 'class': 'av-body', 'style': 'margin-top:.6em' }, [
-				E('div', { 'class': 'av-row' }, [
-					E('button', {
-						'class': 'btn cbi-button cbi-button-neutral',
-						'click': ui.createHandlerFn(this, 'handleRefresh', statusBody)
-					}, _('立即刷新'))
-				])
-			])
 		]);
 
 		/* -------------------------------------------------------- 配置表单 --- */
@@ -324,6 +367,8 @@ return view.extend({
 
 		s.tab('basic', _('账号与门户'),
 			_('账号和门户地址。多数 zportal 学校只需要填账号密码，门户地址留空自动识别。'));
+		s.tab('dns', _('DNS 与 DoH'),
+			_('汇聚 LAN 的 DNS 查询，统一由路由器通过 HTTPS 解析。默认使用腾讯云，也可选择阿里云或自定义服务。'));
 		s.tab('probe', _('探测与轮询'),
 			_('决定“何时认为掉线”以及失败后的重试节奏。' +
 			  '本节末尾还有认证互斥、状态记录和 nextPage 严格校验，保持默认即可。'));
@@ -521,18 +566,75 @@ return view.extend({
 		o.depends('enabled', '1');
 
 		/* --------------------------------------------------------- DNS --- */
-		o = s.taboption('hardening', form.SectionValue, '_dns', form.NamedSection,
-			'dns', 'hardening', _('DNS 收敛'));
+		o = s.taboption('dns', form.SectionValue, '_dns', form.NamedSection,
+			'dns', 'hardening', _('DNS 汇聚与加密上游'));
 		ss = o.subsection;
 		ss.addremove = false;
 		ss.anonymous = true;
 
 		o = ss.option(form.Flag, 'enabled', _('启用'),
 			_('把 LAN 的 udp/tcp 53 重定向到路由器的 dnsmasq。' +
-			  '不同设备的默认解析器、DoH 开关、EDNS 行为都不同，统一后对外只剩一个 DNS 客户端。' +
+			  'dnsmasq 的上游统一通过本机 https-dns-proxy 使用 DoH，不回退明文 DNS。' +
 			  '注意：浏览器启用 DoH 时走 443，本项覆盖不到。'));
 		o.default = '1';
 		o.rmempty = false;
+
+		var dnsSection = ss;
+		var dnsSummary = E('div', { 'class': 'av-notice av-dns-summary', 'role': 'status', 'aria-live': 'polite' });
+		o = ss.option(form.DummyValue, '_dns_summary', _('上游预览'));
+		o.depends('enabled', '1');
+		o.renderWidget = function() {
+			dom.content(dnsSummary, self.renderDnsSummary(uci.get('autoverify', 'dns', 'doh_provider') || 'tencent', dnsSection));
+			return E('div', {}, [
+				dnsSummary,
+				E('div', { 'class': 'av-route', 'aria-label': _('DNS 解析链路') }, [
+					E('span', {}, _('客户端 DNS')), '→', E('span', {}, 'dnsmasq'), '→', E('span', {}, _('DoH 上游'))
+				]),
+				E('div', { 'class': 'av-hint' }, _('DoH 失败时不回退明文 DNS。修改后点击“保存并应用”生效。'))
+			]);
+		};
+
+		o = ss.option(form.ListValue, 'doh_provider', _('DoH 上游'));
+		o.value('tencent', _('腾讯云 DNSPod（doh.pub）'));
+		o.value('aliyun', _('阿里云公共 DNS（dns.alidns.com）'));
+		o.value('custom', _('自定义'));
+		o.default = 'tencent';
+		o.rmempty = false;
+		o.depends('enabled', '1');
+		o.onchange = function(ev, section_id, value) {
+			dom.content(dnsSummary, self.renderDnsSummary(value, dnsSection));
+		};
+
+		o = ss.option(form.Value, 'doh_url', _('自定义 DoH URL'),
+			_('填写支持 RFC 8484 的 HTTPS 地址，使用域名进行 TLS 证书验证。'));
+		o.placeholder = 'https://resolver.example/dns-query';
+		o.rmempty = false;
+		o.retain = true;
+		o.depends({ enabled: '1', doh_provider: 'custom' });
+		o.onchange = function() {
+			dom.content(dnsSummary, self.renderDnsSummary('custom', dnsSection));
+		};
+		o.validate = function(section_id, value) {
+			var match = /^https:\/\/([A-Za-z0-9][A-Za-z0-9.-]*)(?::(\d+))?\/[A-Za-z0-9_\/.~?&=%+:-]*$/.exec(value);
+			if (!match || (match[2] && (Number(match[2]) < 1 || Number(match[2]) > 65535)))
+				return _('请输入有效的 HTTPS DoH URL');
+			if (/^[0-9.]+$/.test(match[1]) && !/^(\d+\.){3}\d+$/.test(match[1]))
+				return _('IPv4 地址无效');
+			return !/^[0-9.]+$/.test(match[1]) || match[1].split('.').every(function(n) { return Number(n) <= 255; })
+				? true : _('IPv4 地址无效');
+		};
+
+		o = ss.option(form.Value, 'doh_bootstrap', _('Bootstrap DNS'),
+			_('仅用于解析 DoH 服务域名，使用明文 DNS；填写 IPv4 地址，以逗号分隔。普通查询不回退到这里。'));
+		o.default = '119.29.29.29';
+		o.rmempty = false;
+		o.retain = true;
+		o.depends({ enabled: '1', doh_provider: 'custom' });
+		o.validate = function(section_id, value) {
+			return value.split(',').every(function(ip) {
+				return /^(\d+\.){3}\d+$/.test(ip) && ip.split('.').every(function(n) { return Number(n) <= 255; });
+			}) ? true : _('请输入逗号分隔的 IPv4 地址');
+		};
 
 		/* -------------------------------------------------------- DHCP --- */
 		o = s.taboption('hardening', form.SectionValue, '_dhcp', form.NamedSection,
@@ -577,11 +679,11 @@ return view.extend({
 		/* --------------------------------------------------------- 操作 --- */
 		/* 自己用 .av-row 排版, 不借用表单的 .cbi-value: 那个类在不同主题下的
 		 * 缩进、行高按表单字段调过, 拿来装按钮会跟着变。 */
-		var actions = E('div', { 'class': 'cbi-section' }, [
-			E('h3', _('操作')),
+		var actions = E('div', { 'class': 'cbi-section av-actions' }, [
+			E('div', { 'class': 'av-header' }, [ E('h3', _('认证与诊断')), E('span', { 'class': 'av-hint' }, _('结果以弹窗显示')) ]),
 			E('div', { 'class': 'av-body' }, [
 				E('div', { 'class': 'cbi-section-descr' },
-					_('以下按钮调用路由器上的命令，输出和退出码会弹窗显示，不会修改任何配置。')),
+					_('手动认证、连通性检测和只读诊断。操作期间按钮会暂时禁用，完成后刷新运行状态。')),
 
 				E('div', { 'class': 'av-group' }, _('认证')),
 				E('div', { 'class': 'av-row' }, [
@@ -635,7 +737,8 @@ return view.extend({
 				return self.pollStatus(statusBody);
 			}, STATUS_INTERVAL);
 
-			return E([], [
+			self._statusBody = statusBody;
+			return E('div', { 'class': 'av-page' }, [
 				E('style', { 'type': 'text/css' }, STYLE),
 				statusPanel,
 				mapEl,

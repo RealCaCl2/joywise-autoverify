@@ -834,6 +834,16 @@ run_validate() {
 	validate_bool "ttl.enabled" "$(av_cfg ttl enabled "1")"
 	validate_bool "ntp.enabled" "$(av_cfg ntp enabled "1")"
 	validate_bool "dns.enabled" "$(av_cfg dns enabled "1")"
+	if [ "$(av_cfg_bool dns enabled 0)" = 1 ]; then
+		_dns_lib="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
+		if [ -r "$_dns_lib" ]; then
+			# shellcheck disable=SC1090
+			. "$_dns_lib"
+			dns_doh_url || validate_error 'DoH 预设、自定义 HTTPS URL 或 bootstrap IPv4 列表无效'
+		else
+			validate_error '缺少 DNS DoH 配置库'
+		fi
+	fi
 	validate_bool "dhcp.enabled" "$(av_cfg_bool dhcp enabled "1")"
 	validate_bool "ipv6.enabled" "$(av_cfg_bool ipv6 enabled "1")"
 

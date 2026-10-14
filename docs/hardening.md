@@ -132,10 +132,12 @@ DNS 和 NTP 是最容易被忽略的两个多设备特征源 —— 因为它们
 ```sh
 autoverify-hardening dns on
 autoverify-hardening dns off
-autoverify-hardening dns status      # 含 dnsmasq 监听情况和规则计数
+autoverify-hardening status          # 含 dnsmasq / DoH 代理监听和规则计数
 ```
 
 启用前会先检查本机 53 端口真的在监听，否则拒绝启用（重定向过去没人应答 = 客户端直接断解析）。
+代理启动后最多等待 5 秒确认 `127.0.0.1:5053` 的 UDP 监听，再添加 DNS 重定向。
+监听检查只证明本机代理存在，不代表 DoH 网络可达或 TLS 握手成功。
 
 ### 为什么客户端感知不到
 
@@ -147,7 +149,41 @@ autoverify-hardening dns status      # 含 dnsmasq 监听情况和规则计数
 客户端看到: 回包源地址仍是 8.8.8.8
 ```
 
-路由器自己的上游查询走 `10.80.3.64 → 校园 DNS`，不受影响。
+路由器上游改为 `dnsmasq → 127.0.0.1:5053 → https-dns-proxy → DoH`。
+所有 dnsmasq UCI 实例均设置 `noresolv=1`，替换 `server`（含分域转发）并移除
+`serversfile`，不再读取 WAN 下发的明文 DNS，也不在 DoH 失败时回退明文上游。
+
+套件依赖 `https-dns-proxy` 和 `ca-bundle`。LuCI 提供三个预设，UCI 配置项为
+`autoverify.dns.doh_provider`（旧配置缺失时默认 `tencent`）：
+
+| 预设 | DoH 端点 | Bootstrap DNS |
+| --- | --- | --- |
+| `tencent`（默认） | `https://doh.pub/dns-query` | `119.29.29.29` |
+| `aliyun` | `https://dns.alidns.com/dns-query` | `223.5.5.5,223.6.6.6` |
+| `custom` | `autoverify.dns.doh_url` | `autoverify.dns.doh_bootstrap`（逗号分隔的 IPv4） |
+
+预设固定使用对应域名端点与 bootstrap，自定义字段只在 `custom` 时生效。
+自定义 URL 必须使用 HTTPS，可含端口及查询参数；不支持 URL 用户名/密码和 IPv6 字面量。
+始终保持 TLS 证书验证。Bootstrap 使用明文 DNS，仅用于解析 DoH 服务自身的域名，
+普通客户端查询不会被发送给 bootstrap，也不会在 DoH 失败时回退到它。
+域名端点符合 DNSPod [官方接入建议](https://docs.dnspod.cn/notices/mian-fei-ban-dot-dohbu-zai-gong-kai-ipjie-ru-de-gong-gao/)
+和[阿里公共 DNS 说明](https://alidns.com/)。
+
+```sh
+uci set autoverify.dns.doh_provider='aliyun'
+uci commit autoverify
+autoverify-apply
+# 自定义：同时设置 doh_provider=custom、doh_url 和 doh_bootstrap。
+```
+
+首次启用保存原 https-dns-proxy 配置及启用/运行状态到 `/etc/autoverify-dns/`，
+dnsmasq 原上游保存在各实例的 `av_doh_*` UCI 选项；重复应用不覆盖备份。
+关闭 DNS 收敛时恢复这些配置和服务状态。启用期间由本套件接管代理配置，
+不要同时用其他插件改 DNS 上游，也不要手动删除备份或重新排列 dnsmasq 实例。
+自定义 dnsmasq `confdir`/`conf-file` 中的上游配置不由 UCI 管理，需先移除。
+
+实现使用 OpenWrt [https-dns-proxy 的 UCI 接口](https://github.com/openwrt/packages/tree/master/net/https-dns-proxy)，
+关闭其自动 dnsmasq 更新和强制 DNS 规则，仅保留本套件原有的 LAN 53 重定向范围。
 
 ### 没覆盖的
 
@@ -156,8 +192,10 @@ autoverify-hardening dns status      # 含 dnsmasq 监听情况和规则计数
 
 ### 代价
 
-基本没有。dnsmasq 本来就在跑，客户端只是从“自己解析”变成“让路由器解析”。
-唯一影响：客户端无法再用自定义 DNS（比如自带广告过滤的解析器）。
+需要运行 DoH 代理，增加 HTTPS 请求开销。客户端无法再用自定义 DNS
+（比如自带广告过滤的解析器），原分域上游也会暂停。DoH 不可达、TLS 时间/证书
+错误或校园网认证前禁止 HTTPS 时，外部域名解析会失败；门户可使用 IP 地址配置，
+也可关闭 DNS 收敛恢复原上游后完成认证。启用前应验证网络可访问所选端点。
 
 ## DHCP 伪装
 

@@ -19,6 +19,10 @@ AV_LIB="${AV_LIB:-/usr/lib/autoverify/cfg.sh}"
 # shellcheck disable=SC1090
 [ -r "$AV_LIB" ] || { printf 'autoverify-apply: 找不到 %s\n' "$AV_LIB" >&2; exit 1; }
 . "$AV_LIB"
+AV_DNS_LIB="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
+# shellcheck disable=SC1090
+[ -r "$AV_DNS_LIB" ] || { printf 'autoverify-apply: 找不到 %s\n' "$AV_DNS_LIB" >&2; exit 1; }
+. "$AV_DNS_LIB"
 
 NFT_FILE=/etc/nftables.d/20-ttl-normalize.nft
 NTP_SEC="ntp_converge"
@@ -125,13 +129,15 @@ apply_dns() {
 			log "本机 53 端口没有监听(dnsmasq 没跑?)，跳过 DNS 收敛"
 			uci -q delete "firewall.$DNS_SEC_UDP"
 			uci -q delete "firewall.$DNS_SEC_TCP"
-			return 0
+			return 1
 		fi
+		dns_doh_apply || return 1
 		add_dns_redirect "$DNS_SEC_UDP" udp
 		add_dns_redirect "$DNS_SEC_TCP" tcp
 	else
 		uci -q delete "firewall.$DNS_SEC_UDP"
 		uci -q delete "firewall.$DNS_SEC_TCP"
+		dns_doh_restore || return 1
 	fi
 	return 0
 }
@@ -279,10 +285,11 @@ apply_ipv6() {
 
 main() {
 	need_uci
+	_failed=0
 
 	apply_ttl
 	apply_ntp
-	apply_dns
+	apply_dns || _failed=1
 	apply_dhcp
 	apply_ipv6
 	uci commit firewall
@@ -294,8 +301,12 @@ main() {
 
 	[ "$(av_cfg_bool ttl enabled 0)" = "1" ] && warn_offload
 
-	log "已应用: ttl=$(av_cfg_bool ttl enabled 0) ntp=$(av_cfg_bool ntp enabled 0) dns=$(av_cfg_bool dns enabled 0) dhcp=$(av_cfg_bool dhcp enabled 1) ipv6=$(av_cfg_bool ipv6 enabled 1)"
-	return 0
+	if [ "$_failed" = 0 ]; then
+		log "已应用: ttl=$(av_cfg_bool ttl enabled 0) ntp=$(av_cfg_bool ntp enabled 0) dns=$(av_cfg_bool dns enabled 0) dhcp=$(av_cfg_bool dhcp enabled 1) ipv6=$(av_cfg_bool ipv6 enabled 1)"
+	else
+		log 'DNS DoH 收敛应用失败，请检查依赖、配置及代理监听'
+	fi
+	return "$_failed"
 }
 
 main

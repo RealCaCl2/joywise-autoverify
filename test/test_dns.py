@@ -1,0 +1,194 @@
+"""Exercise POSIX DNS apply/restore with a stateful UCI and init-service mock."""
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+def mock_uci(args):
+    path = Path(os.environ['DNS_TEST_DB'])
+    db = json.loads(path.read_text())
+    args = [a for a in args if a != '-q']
+    cmd, key = args[:2]
+    if cmd == 'get':
+        if key not in db:
+            return 1
+        value = db[key]
+        print(' '.join(value) if isinstance(value, list) else value)
+    elif cmd == 'show':
+        for k, v in db.items():
+            if k.startswith(key + '.') and isinstance(v, str):
+                print(k + '=' + v)
+    elif cmd in ('set', 'add_list'):
+        key, value = key.split('=', 1)
+        if cmd == 'set':
+            db[key] = value
+        else:
+            db.setdefault(key, []).append(value)
+    elif cmd == 'delete':
+        if key not in db:
+            return 1
+        del db[key]
+    elif cmd == 'export':
+        print(json.dumps({k: v for k, v in db.items() if k.startswith(key + '.')}))
+    elif cmd == 'import':
+        content = sys.stdin.read()
+        db = {k: v for k, v in db.items() if not k.startswith(key + '.')}
+        if content.lstrip().startswith('{'):
+            db.update(json.loads(content))
+        else:
+            section = None
+            for line in content.splitlines():
+                parts = shlex.split(line)
+                if not parts:
+                    continue
+                if parts[0] == 'config':
+                    section = key + '.' + parts[2]
+                    db[section] = parts[1]
+                elif parts[0] == 'option':
+                    db[section + '.' + parts[1]] = parts[2]
+    elif cmd != 'commit':
+        raise ValueError(args)
+    path.write_text(json.dumps(db))
+    return 0
+
+
+class DnsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / 'uci.json'
+        self.initial = {
+            'dhcp.@dnsmasq[0]': 'dnsmasq',
+            'dhcp.@dnsmasq[0].server': ['8.8.8.8#53', '/campus/10.0.0.1'],
+            'dhcp.@dnsmasq[0].serversfile': '/etc/custom-servers',
+            'dhcp.other': 'dnsmasq',
+            'dhcp.other.noresolv': '0',
+            'dhcp.lan': 'dhcp',
+            'https-dns-proxy.config': 'main',
+            'https-dns-proxy.config.force_dns': '1',
+            'https-dns-proxy.old': 'https-dns-proxy',
+            'https-dns-proxy.old.resolver_url': 'https://example.org/dns-query',
+        }
+        self.db_path.write_text(json.dumps(self.initial))
+        self.service = self.root / 'proxy'
+        self.service.write_text('''#!/bin/sh
+echo "$1" >> "$DNS_TEST_CALLS"
+case "$1" in
+enabled|status) [ "$DNS_TEST_ORIGINAL_RUNNING" = 1 ] ;;
+restart) [ "$DNS_TEST_FAIL" != 1 ] ;;
+*) exit 0 ;;
+esac
+''')
+        self.service.chmod(0o755)
+        self.env = dict(os.environ, DNS_TEST_DB=str(self.db_path),
+                        DNS_DOH_STATE=str(self.root / 'state'),
+                        DNS_DOH_INIT=str(self.service),
+                        DNS_TEST_CALLS=str(self.root / 'calls'),
+                        DNS_TEST_ORIGINAL_RUNNING='1', DNS_TEST_FAIL='0', DNS_TEST_LISTEN='1')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_shell(self, command, url='', provider='tencent', bootstrap='119.29.29.29'):
+        helper = Path(__file__).resolve().parents[1] / 'files/usr/lib/autoverify/dns.sh'
+        quote = lambda p: shlex.quote(str(p).replace('\\', '/'))
+        script = (f'uci() {{ {quote(sys.executable)} {quote(Path(__file__).resolve())} uci "$@"; }}\n'
+                  'av_cfg() { case "$2" in\n'
+                  f'doh_provider) printf "%s\\n" {shlex.quote(provider)} ;;\n'
+                  f'doh_url) printf "%s\\n" {shlex.quote(url)} ;;\n'
+                  f'doh_bootstrap) printf "%s\\n" {shlex.quote(bootstrap)} ;;\n'
+                  'esac; }\n'
+                  'log() { echo "$*" >&2; }\n'
+                  'netstat() { [ "$DNS_TEST_LISTEN" = 1 ] && echo "udp 0 0 127.0.0.1:5053 0.0.0.0:*"; }\n'
+                  'sleep() { :; }\n'
+                  f'. {quote(helper)}\n{command}')
+        shell = 'C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else '/bin/sh'
+        return subprocess.run([shell, '-c', script], env=self.env, capture_output=True,
+                              text=True, encoding='utf-8')
+
+    def db(self):
+        return json.loads(self.db_path.read_text())
+
+    def test_apply_repeat_restore(self):
+        for _ in range(2):
+            result = self.run_shell('dns_doh_apply')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            db = self.db()
+            for section in ('dhcp.@dnsmasq[0]', 'dhcp.other'):
+                self.assertEqual(db[section + '.server'], ['127.0.0.1#5053'])
+                self.assertEqual(db[section + '.noresolv'], '1')
+                self.assertNotIn(section + '.serversfile', db)
+            self.assertEqual(db['https-dns-proxy.config.dnsmasq_config_update'], '-')
+            self.assertEqual(db['https-dns-proxy.config.force_dns'], '0')
+            self.assertEqual(db['https-dns-proxy.autoverify.resolver_url'], 'https://doh.pub/dns-query')
+            self.assertEqual(db['https-dns-proxy.autoverify.bootstrap_dns'], '119.29.29.29')
+        result = self.run_shell('dns_doh_restore; dns_doh_restore')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.db(), self.initial)
+
+    def test_disabled_original_stays_disabled(self):
+        self.env['DNS_TEST_ORIGINAL_RUNNING'] = '0'
+        result = self.run_shell('dns_doh_apply && dns_doh_restore')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / 'calls').read_text().splitlines()
+        self.assertEqual(calls[-1], 'disable')
+        self.assertNotIn('start', calls)
+
+    def test_failure_never_falls_back(self):
+        self.env['DNS_TEST_FAIL'] = '1'
+        self.assertNotEqual(self.run_shell('dns_doh_apply').returncode, 0)
+        self.assertEqual(self.db()['dhcp.@dnsmasq[0].server'], ['127.0.0.1#5053'])
+        self.assertEqual(self.run_shell('dns_doh_restore').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+
+    def test_reject_invalid_custom_url(self):
+        for url in ('http://resolver.example/dns-query', 'https://user:pass@resolver.example/dns-query',
+                    'https://999.1.1.1/dns-query', "https://resolver.example/dns-query'", '',
+                    'https://resolver.example:70000/dns-query'):
+            self.assertNotEqual(self.run_shell('dns_doh_apply', url, 'custom').returncode, 0, url)
+            self.assertEqual(self.db(), self.initial)
+
+    def test_presets_and_custom_switching(self):
+        for provider, url, bootstrap, expected in (
+            ('aliyun', 'ignored', 'ignored', 'https://dns.alidns.com/dns-query'),
+            ('custom', 'https://resolver.example:8443/dns-query?key=abc', '9.9.9.9,149.112.112.112',
+             'https://resolver.example:8443/dns-query?key=abc'),
+            ('tencent', '', '', 'https://doh.pub/dns-query'),
+        ):
+            result = self.run_shell('dns_doh_apply', url, provider, bootstrap)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            db = self.db()
+            self.assertEqual(db['https-dns-proxy.autoverify.resolver_url'], expected)
+            expected_bootstrap = {'aliyun': '223.5.5.5,223.6.6.6', 'tencent': '119.29.29.29'}.get(provider, bootstrap)
+            self.assertEqual(db['https-dns-proxy.autoverify.bootstrap_dns'], expected_bootstrap)
+            self.assertEqual(db['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertEqual(self.run_shell('dns_doh_restore').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+
+    def test_invalid_provider_and_bootstrap(self):
+        self.assertNotEqual(self.run_shell('dns_doh_apply', provider='unknown').returncode, 0)
+        for bootstrap in ('', '999.1.1.1', '1.1.1.1,', 'dns.example', '1.1.1.1 8.8.8.8'):
+            self.assertNotEqual(self.run_shell('dns_doh_apply', 'https://resolver.example/dns-query',
+                                             'custom', bootstrap).returncode, 0)
+            self.assertEqual(self.db(), self.initial)
+
+    def test_no_listener_never_falls_back(self):
+        self.env['DNS_TEST_LISTEN'] = '0'
+        self.assertNotEqual(self.run_shell('dns_doh_apply').returncode, 0)
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+
+    def test_missing_dependency_changes_nothing(self):
+        self.env['DNS_DOH_INIT'] = str(self.root / 'missing')
+        self.assertNotEqual(self.run_shell('dns_doh_apply').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == 'uci':
+        sys.exit(mock_uci(sys.argv[2:]))
+    unittest.main()

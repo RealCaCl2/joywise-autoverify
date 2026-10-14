@@ -1,7 +1,25 @@
 # 实测记录
 
-> 这些是在真实校园网环境里跑出来的结果，用来证明各功能确实生效。
-> 复现命令见各条目自身。
+> 本文件区分本地验证与真实校园网 / OpenWrt 实测；本地结果不代表设备验收。
+> 复现命令和验证范围见各条目自身。
+
+## 2026-10-14：DNS DoH 与 LuCI 优化（本地验证）
+
+- `python3 test/test_dns.py`：8 项通过，覆盖腾讯 / 阿里 / 自定义预设、连续切换、
+  重复应用、原上游与服务状态恢复、非法配置、依赖缺失、代理失败与监听缺失。
+- WSL 中使用纯 Linux PATH、清除代理变量运行 `sh test/run.sh`：完整认证回归通过，
+  包括并发互斥和 stale lock 回收。保留 Windows PATH / 代理变量的首次 WSL 运行
+  曾出现并发用例的时序失败；排除环境干扰后无需修改认证逻辑即可通过。
+- `dash -n`、`node --check`、Python / JSON 解析与 `git diff --check` 通过。
+- 当前电脑对腾讯 `https://doh.pub/dns-query` 的 RFC 8484 POST 返回 HTTP 200。
+  阿里域名首次直连遇到 TLS 连接中断；使用其官方 `223.5.5.5` 节点并保留
+  `dns.alidns.com` 的 SNI / 证书校验后，POST 返回 HTTP 200。两者 DNS 响应均包含答案。
+- `test/ui-preview.html` 加载真实视图 JS、模拟 LuCI 数据及 RPC：验证预设摘要更新、
+  自定义字段显隐、操作按钮互斥、结果弹窗、刷新后保留详情展开状态。
+  390px 窄屏与亮/暗主题无页面水平溢出；预览图片见
+  [桌面](ui-doh-preview.jpg) / [手机暗色](ui-doh-mobile-preview.jpg)。
+- 未执行：SDK APK 构建、OpenWrt 实机、真实 LuCI / Argon 主题验收、校园网 DoH
+  连通性与出站抓包。上述预览使用模拟数据，不包含真实账号或设备状态。
 
 ---
 

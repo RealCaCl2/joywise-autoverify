@@ -44,6 +44,11 @@ config hardening 'ntp'
 
 config hardening 'dns'
 	option enabled '1'
+	# 预设: tencent / aliyun / custom。普通查询只走 DoH。
+	option doh_provider 'tencent'
+	# 以下仅用于 custom；bootstrap 只解析 DoH 服务域名。
+	option doh_url ''
+	option doh_bootstrap '119.29.29.29'
 
 config hardening 'dhcp'
 	option enabled '1'

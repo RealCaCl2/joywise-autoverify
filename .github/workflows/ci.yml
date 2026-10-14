@@ -30,6 +30,7 @@ jobs:
                    files/usr/sbin/autoverify-apply \
                    files/usr/sbin/autoverify-hardening \
                    files/usr/lib/autoverify/cfg.sh \
+                   files/usr/lib/autoverify/dns.sh \
                    files/usr/lib/autoverify/lock.sh \
                    files/usr/lib/autoverify/state.sh \
                    files/etc/init.d/autoverify \
@@ -48,6 +49,7 @@ jobs:
             files/usr/sbin/autoverify files/usr/sbin/autoverify-apply \
             files/usr/sbin/autoverify-hardening files/usr/lib/autoverify/cfg.sh \
             files/usr/lib/autoverify/lock.sh files/usr/lib/autoverify/state.sh \
+            files/usr/lib/autoverify/dns.sh \
             files/etc/init.d/autoverify files/etc/hotplug.d/iface/99-autoverify \
             files/etc/uci-defaults/90-autoverify-migrate test/run.sh
 
@@ -75,6 +77,7 @@ jobs:
             files/usr/sbin/autoverify-apply
             files/usr/sbin/autoverify-hardening
             files/usr/lib/autoverify/cfg.sh
+            files/usr/lib/autoverify/dns.sh
             files/usr/lib/autoverify/lock.sh
             files/usr/lib/autoverify/state.sh
             files/usr/lib/autoverify/refresh-luci-cache.sh
@@ -97,7 +100,9 @@ jobs:
           grep -F 'define Package/autoverify/conffiles' package/autoverify/Makefile
 
       - name: 回归测试
-        run: sh test/run.sh
+        run: |
+          python3 test/test_dns.py
+          sh test/run.sh
 
   build:
     name: 构建 apk

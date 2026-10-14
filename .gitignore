@@ -20,6 +20,7 @@ Thumbs.db
 *.bak
 *.orig
 *.rej
+/.test-tmp/
 
 # 注意：files/etc/config/autoverify 是**包内默认配置**（账号密码为空），必须提交。
 # 你自己的真实配置在路由器上（/etc/config/autoverify），不要拷进仓库。

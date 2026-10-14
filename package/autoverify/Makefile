@@ -11,7 +11,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=autoverify
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=15
+PKG_RELEASE:=16
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=CaCl2 <RealCaCl2@users.noreply.github.com>
@@ -24,7 +24,7 @@ define Package/autoverify
   CATEGORY:=Network
   SUBMENU:=Captive Portals
   TITLE:=Joywise campus portal (zportal) auto authentication + anti-detection hardening
-  DEPENDS:=+curl +luci-base
+  DEPENDS:=+curl +luci-base +https-dns-proxy +ca-bundle
   PKGARCH:=all
 endef
 
@@ -64,6 +64,7 @@ define Package/autoverify/install
 	$(INSTALL_BIN)  ./files/usr/sbin/autoverify-apply     $(1)/usr/sbin/
 	$(INSTALL_BIN)  ./files/usr/sbin/autoverify-hardening $(1)/usr/sbin/
 	$(INSTALL_DATA) ./files/usr/lib/autoverify/cfg.sh     $(1)/usr/lib/autoverify/
+	$(INSTALL_DATA) ./files/usr/lib/autoverify/dns.sh     $(1)/usr/lib/autoverify/
 	$(INSTALL_DATA) ./files/usr/lib/autoverify/lock.sh   $(1)/usr/lib/autoverify/
 	$(INSTALL_DATA) ./files/usr/lib/autoverify/state.sh  $(1)/usr/lib/autoverify/
 	$(INSTALL_BIN)  ./files/usr/lib/autoverify/refresh-luci-cache.sh $(1)/usr/lib/autoverify/
