@@ -6,7 +6,7 @@
 #
 #   hardening.ttl.enabled -> /etc/nftables.d/20-ttl-normalize.nft
 #   hardening.ntp.enabled -> firewall.ntp_converge + system.ntp.enable_server
-#   hardening.dns.enabled -> firewall.dns_converge_udp / dns_converge_tcp
+#   dns.enabled -> dnsmasq DoH 上游；dns.redirect -> LAN 53 重定向（默认关闭）
 #   hardening.dhcp.enabled -> network.<iface>.hostname/clientid/vendorid + wan6.noclientfqdn
 #   hardening.ipv6.enabled -> dhcp.lan 的 ra / dhcpv6 关掉
 #
@@ -108,7 +108,9 @@ apply_ntp() {
 # ---------------------------------------------------------------- DNS ------
 
 apply_dns() {
-	_ip=$(lan_ip) || { log "读不到 network.lan.ipaddr"; return 1; }
+	# 先移除旧版本或上次启用的接管规则，即使后续 DoH 应用失败也不残留。
+	uci -q delete "firewall.$DNS_SEC_UDP"
+	uci -q delete "firewall.$DNS_SEC_TCP"
 
 	add_dns_redirect() {
 		_sec="$1"; _proto="$2"
@@ -126,17 +128,16 @@ apply_dns() {
 	if [ "$(av_cfg_bool dns enabled 0)" = "1" ]; then
 		# 本机 53 没人听就别开, 否则客户端直接断解析
 		if ! netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]'; then
-			log "本机 53 端口没有监听(dnsmasq 没跑?)，跳过 DNS 收敛"
-			uci -q delete "firewall.$DNS_SEC_UDP"
-			uci -q delete "firewall.$DNS_SEC_TCP"
+			log "本机 53 端口没有监听(dnsmasq 没跑?)，跳过路由器 DoH"
 			return 1
 		fi
 		dns_doh_apply || return 1
-		add_dns_redirect "$DNS_SEC_UDP" udp
-		add_dns_redirect "$DNS_SEC_TCP" tcp
+		if [ "$(av_cfg_bool dns redirect 0)" = "1" ]; then
+			_ip=$(lan_ip) || { log "读不到 network.lan.ipaddr，无法接管 LAN DNS"; return 1; }
+			add_dns_redirect "$DNS_SEC_UDP" udp
+			add_dns_redirect "$DNS_SEC_TCP" tcp
+		fi
 	else
-		uci -q delete "firewall.$DNS_SEC_UDP"
-		uci -q delete "firewall.$DNS_SEC_TCP"
 		dns_doh_restore || return 1
 	fi
 	return 0

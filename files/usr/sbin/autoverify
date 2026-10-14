@@ -834,6 +834,7 @@ run_validate() {
 	validate_bool "ttl.enabled" "$(av_cfg ttl enabled "1")"
 	validate_bool "ntp.enabled" "$(av_cfg ntp enabled "1")"
 	validate_bool "dns.enabled" "$(av_cfg dns enabled "1")"
+	validate_bool "dns.redirect" "$(av_cfg dns redirect "0")"
 	if [ "$(av_cfg_bool dns enabled 0)" = 1 ]; then
 		_dns_lib="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
 		if [ -r "$_dns_lib" ]; then

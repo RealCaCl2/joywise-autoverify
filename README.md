@@ -25,14 +25,17 @@
 - **请仅在具有使用权的账号与网络上运行本程序。**
 - 作者不对使用本项目所产生的任何后果承担责任。
 
-DNS 收敛启用后，上游统一由 `https-dns-proxy` 走 DoH，不回退明文 DNS。
+路由器 DoH 启用后，dnsmasq 上游由 `https-dns-proxy` 走 DoH，不回退明文 DNS。
+默认不接管局域网 DNS：使用路由器 DNS 的设备享用 DoH，Clash 等客户端可以使用自己的解析器。
+`dns.enabled` 控制 DoH，新增 `dns.redirect` 控制强制接管 LAN UDP/TCP 53，默认 `0`。
+旧配置缺少 `redirect` 时也默认关闭接管，下次应用会清理插件旧规则；已有 DoH 开关保持不变。
 LuCI 提供腾讯云 DNSPod（默认）、阿里云公共 DNS 和自定义三个预设，使用域名 DoH 端点。
 Bootstrap DNS 仅解析 DoH 服务域名；关闭功能时恢复原上游。详见 [DNS 收敛说明](docs/hardening.md)。
 
 **DNS DoH 的设备前提**：必须安装 `https-dns-proxy`（本机 DoH 代理）和 `ca-bundle`
 （TLS 证书），并运行 dnsmasq。APK 已声明代理和证书依赖，通过 `apk add` 安装套件时
 会自动安装缺少的依赖。仅手动复制脚本时，需要先执行
-`apk add https-dns-proxy ca-bundle`。安装依赖后，在 LuCI 的“DNS 与 DoH”中启用汇聚并保存应用。
+`apk add https-dns-proxy ca-bundle`。安装依赖后，在 LuCI 的“DNS 与 DoH”中启用“路由器使用 DoH”并保存应用。
 
 ---
 
@@ -260,7 +263,7 @@ origin、非 HTTP(S) 地址、过长地址，并会把 `nextPage` 请求的 curl
 | 选项卡 | 分组 | 内容 |
 |---|---|---|
 | 账号与门户 | 账号 / 门户 | 启用开关、账号、密码；门户地址 / 端口 / 登录页地址覆盖 |
-| DNS 与 DoH | DNS 汇聚与加密上游 | 启用开关、腾讯云 / 阿里云 / 自定义预设、上游预览；自定义 HTTPS URL 与 Bootstrap DNS |
+| DNS 与 DoH | 路由器 DoH 与 DNS 接管 | DoH 开关、默认关闭的强制接管开关、腾讯云 / 阿里云 / 自定义预设、上游预览；自定义 HTTPS URL 与 Bootstrap DNS |
 | 探测与轮询 | 探测与轮询 | 探测地址（可增删多条）、期望状态码、各类超时与间隔、UA，以及认证互斥锁、锁最大存活时间、运行状态记录、nextPage 严格校验 |
 | 接口 | 接口 | 出口 netdev、hotplug 接口、LAN 接口 |
 | 反检测加固 | TTL / NTP / DHCP / IPv6 | TTL 开关与值、NTP 上游服务器、DHCP 伪装（主机名与厂商号）、IPv6 防护 |

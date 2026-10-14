@@ -78,7 +78,8 @@ status)
 	echo "===== 配置 (UCI /etc/config/autoverify) ====="
 	printf '  TTL 归一化 : %s  值=%s\n' "$(_bool ttl)" "$(av_cfg ttl ttl 64)"
 	printf '  NTP 收敛   : %s\n' "$(_bool ntp)"
-	printf '  DNS 收敛   : %s\n' "$(_bool dns)"
+	printf '  路由器 DoH : %s\n' "$(_bool dns)"
+	printf '  DNS 接管配置: %s (仅 DoH 启用时生效)\n' "$(av_cfg_bool dns redirect 0)"
 	if dns_doh_url; then
 		printf '  DoH 上游   : %s (%s)\n' "$_doh_url" "$_doh_provider"
 		printf '  Bootstrap  : %s (仅 DoH 服务域名)\n' "$_doh_bootstrap"

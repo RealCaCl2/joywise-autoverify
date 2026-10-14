@@ -32,7 +32,7 @@ def mock_uci(args):
     elif cmd == 'delete':
         if key not in db:
             return 1
-        del db[key]
+        db = {k: v for k, v in db.items() if k != key and not k.startswith(key + '.')}
     elif cmd == 'export':
         print(json.dumps({k: v for k, v in db.items() if k.startswith(key + '.')}))
     elif cmd == 'import':
@@ -89,7 +89,8 @@ esac
                         DNS_DOH_STATE=str(self.root / 'state'),
                         DNS_DOH_INIT=str(self.service),
                         DNS_TEST_CALLS=str(self.root / 'calls'),
-                        DNS_TEST_ORIGINAL_RUNNING='1', DNS_TEST_FAIL='0', DNS_TEST_LISTEN='1')
+                        DNS_TEST_ORIGINAL_RUNNING='1', DNS_TEST_FAIL='0', DNS_TEST_LISTEN='1',
+                        DNS_TEST_DNSMASQ='1', DNS_TEST_LAN_IP='192.168.1.1')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -104,7 +105,9 @@ esac
                   f'doh_bootstrap) printf "%s\\n" {shlex.quote(bootstrap)} ;;\n'
                   'esac; }\n'
                   'log() { echo "$*" >&2; }\n'
-                  'netstat() { [ "$DNS_TEST_LISTEN" = 1 ] && echo "udp 0 0 127.0.0.1:5053 0.0.0.0:*"; }\n'
+                  'netstat() {\n'
+                  '[ "$DNS_TEST_DNSMASQ" = 1 ] && echo "udp 0 0 0.0.0.0:53 0.0.0.0:*";\n'
+                  '[ "$DNS_TEST_LISTEN" = 1 ] && echo "udp 0 0 127.0.0.1:5053 0.0.0.0:*"; }\n'
                   'sleep() { :; }\n'
                   f'. {quote(helper)}\n{command}')
         shell = 'C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else '/bin/sh'
@@ -113,6 +116,77 @@ esac
 
     def db(self):
         return json.loads(self.db_path.read_text())
+
+    def run_apply(self, enabled='1', redirect=None):
+        db = self.db()
+        db['autoverify.dns.enabled'] = enabled
+        db.pop('autoverify.dns.redirect', None)
+        if redirect is not None:
+            db['autoverify.dns.redirect'] = redirect
+        self.db_path.write_text(json.dumps(db))
+        source = (Path(__file__).resolve().parents[1] / 'files/usr/sbin/autoverify-apply').read_text(encoding='utf-8')
+        function = source.split('apply_dns() {', 1)[1].split('# --------------------------------------------------------------- DHCP', 1)[0]
+        return self.run_shell('''
+av_cfg_bool() { uci -q get "autoverify.$1.$2" || printf '%s\\n' "$3"; }
+lan_ip() { [ -n "$DNS_TEST_LAN_IP" ] && echo "$DNS_TEST_LAN_IP"; }
+DNS_SEC_UDP=dns_converge_udp
+DNS_SEC_TCP=dns_converge_tcp
+apply_dns() {''' + function + '\napply_dns')
+
+    def assert_no_redirect(self):
+        self.assertFalse(any(k.startswith('firewall.dns_converge_') for k in self.db()))
+
+    def test_default_doh_without_redirect_removes_old_rules(self):
+        db = self.db()
+        for proto in ('udp', 'tcp'):
+            db['firewall.dns_converge_' + proto] = 'redirect'
+            db['firewall.dns_converge_' + proto + '.src_dport'] = '53'
+        db['firewall.unrelated'] = 'rule'
+        self.db_path.write_text(json.dumps(db))
+        result = self.run_apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_redirect()
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertEqual(self.db()['firewall.unrelated'], 'rule')
+
+    def test_redirect_mode_switch_and_disable_restore(self):
+        result = self.run_apply(redirect='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for proto in ('udp', 'tcp'):
+            prefix = 'firewall.dns_converge_' + proto
+            for option, expected in (('src', 'lan'), ('proto', proto), ('src_dport', '53'),
+                                     ('dest_ip', '192.168.1.1'), ('dest_port', '53'), ('target', 'DNAT')):
+                self.assertEqual(self.db()[prefix + '.' + option], expected)
+        result = self.run_apply(redirect='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_redirect()
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertEqual(self.run_apply(enabled='0', redirect='1').returncode, 0)
+        self.assert_no_redirect()
+        restored = {k: v for k, v in self.db().items() if not k.startswith('autoverify.')}
+        self.assertEqual(restored, self.initial)
+
+    def test_redirect_removed_even_if_proxy_fails(self):
+        self.assertEqual(self.run_apply(redirect='1').returncode, 0)
+        self.env['DNS_TEST_FAIL'] = '1'
+        self.assertNotEqual(self.run_apply(redirect='0').returncode, 0)
+        self.assert_no_redirect()
+
+    def test_missing_dnsmasq_removes_old_redirect(self):
+        self.assertEqual(self.run_apply(redirect='1').returncode, 0)
+        self.env['DNS_TEST_DNSMASQ'] = '0'
+        self.assertNotEqual(self.run_apply(redirect='1').returncode, 0)
+        self.assert_no_redirect()
+
+    def test_doh_without_static_lan_address(self):
+        self.env['DNS_TEST_LAN_IP'] = ''
+        result = self.run_apply(redirect='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assert_no_redirect()
+        self.assertNotEqual(self.run_apply(redirect='1').returncode, 0)
+        self.assert_no_redirect()
+        self.assertEqual(self.run_apply(enabled='0').returncode, 0)
 
     def test_apply_repeat_restore(self):
         for _ in range(2):

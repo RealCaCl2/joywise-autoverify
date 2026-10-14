@@ -3,6 +3,20 @@
 > 本文件区分本地验证与真实校园网 / OpenWrt 实测；本地结果不代表设备验收。
 > 复现命令和验证范围见各条目自身。
 
+## 2026-10-14：DoH 与 LAN DNS 接管拆分（本地验证）
+
+- 默认 `dns.enabled=1`、`dns.redirect=0`；旧配置缺少接管开关时也按关闭处理。
+  已关闭 DoH 的用户升级后保持关闭，需在 LuCI 单独开启“路由器使用 DoH”。
+- WSL `python3 test/test_dns.py`：13 项通过。新增覆盖旧重定向清理、无关防火墙
+  配置保留、显式接管规则、模式切换、关闭后恢复、代理失败、dnsmasq 缺失及
+  无静态 LAN 地址场景。使用状态化 UCI / 服务 mock，没有修改真实设备配置。
+- 纯 Linux PATH、清除代理变量后执行 `sh test/run.sh`：完整认证回归通过。
+  初次使用混合 Windows PATH 的运行进度缓慢，已中断并重跑。
+- `dash -n`（运行脚本）、ShellCheck（三个主脚本）、LuCI JS / Python 语法
+  和 `git diff --check` 均通过；包修订号从 r16 增加到 r17。
+- 未执行：APK 构建、OpenWrt 安装与升级、真实 LuCI 页面操作、私有 Clash 客户端
+  连接及 DNS 抓包验证。本地测试通过不代表这些实机项目已验收。
+
 ## 2026-10-14：DNS DoH 与 LuCI 优化（本地验证）
 
 - `python3 test/test_dns.py`：8 项通过，覆盖腾讯 / 阿里 / 自定义预设、连续切换、

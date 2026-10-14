@@ -116,11 +116,15 @@ DNAT 的回包靠 conntrack 反向改写源地址。实测：
 路由器时钟不准时，后面所有设备跟着不准（TLS 证书校验依赖时间）。
 路由器没认证上不了网时，上游同步会停，时间靠本地晶振维持。
 
-## DNS 收敛
+## 路由器 DoH 与可选 DNS 收敛
 
 ### 解决什么
 
-和 NTP 同一思路。不同设备的默认解析器、DoH 开关、EDNS/ECS 行为、查询 ID 随机化
+默认只为路由器 dnsmasq 设置 DoH 上游，不强制接管局域网 DNS。使用路由器作为
+DNS 的设备通过它解析；Clash、TUN 或私有 VPN 客户端可以继续使用自己的解析器。
+设备到路由器的普通 DNS 查询仍是明文，仅路由器到 DoH 上游的查询加密。
+
+可选的强制接管与 NTP 同一思路。不同设备的默认解析器、DoH 开关、EDNS/ECS 行为、查询 ID 随机化
 方式都不一样，这些 `udp/tcp 53` 请求直接出去，对上游就是“同一 IP 下有一组互不相同的
 DNS 客户端”。重定向到路由器后，由 dnsmasq 统一对外解析。
 
@@ -130,18 +134,29 @@ DNS 和 NTP 是最容易被忽略的两个多设备特征源 —— 因为它们
 ### 用法
 
 ```sh
-autoverify-hardening dns on
-autoverify-hardening dns off
+autoverify-hardening dns on          # 启用路由器 DoH，不改变接管开关
+autoverify-hardening dns off         # 关闭 DoH、清理接管规则、恢复原上游
 autoverify-hardening status          # 含 dnsmasq / DoH 代理监听和规则计数
+
+# 推荐的兼容模式（DoH 开启，强制接管关闭）
+uci set autoverify.dns.enabled='1'
+uci set autoverify.dns.redirect='0'
+uci commit autoverify
+autoverify-apply
+
+# 如确需强制接管，再显式设置 redirect=1 并提交、应用。
 ```
 
 启用前会先检查本机 53 端口真的在监听，否则拒绝启用（重定向过去没人应答 = 客户端直接断解析）。
-代理启动后最多等待 5 秒确认 `127.0.0.1:5053` 的 UDP 监听，再添加 DNS 重定向。
+代理启动后最多等待 5 秒确认 `127.0.0.1:5053` 的 UDP 监听，仅在 `dns.redirect=1`
+且 `dns.enabled=1` 时添加 DNS 重定向。`redirect` 缺失时默认 `0`，适用于保留旧配置的升级。
+每次应用先清理插件旧重定向；即使 DoH 启动失败也不会保留上次的接管规则。
+关闭接管仍保留 DoH；关闭 DoH 则移除接管并恢复原上游，不清除保存的接管开关偏好。
 监听检查只证明本机代理存在，不代表 DoH 网络可达或 TLS 握手成功。
 
-### 为什么客户端感知不到
+### 可选接管的工作方式
 
-和 NTP 一样靠 conntrack 反向改写。实测：
+启用强制接管时，和 NTP 一样靠 conntrack 反向改写。此前接管模式实测：
 
 ```
 客户端发:  src=192.168.1.156 dst=8.8.8.8 dport=53
@@ -178,12 +193,12 @@ autoverify-apply
 
 首次启用保存原 https-dns-proxy 配置及启用/运行状态到 `/etc/autoverify-dns/`，
 dnsmasq 原上游保存在各实例的 `av_doh_*` UCI 选项；重复应用不覆盖备份。
-关闭 DNS 收敛时恢复这些配置和服务状态。启用期间由本套件接管代理配置，
+关闭路由器 DoH 时恢复这些配置和服务状态。启用期间由本套件接管代理配置，
 不要同时用其他插件改 DNS 上游，也不要手动删除备份或重新排列 dnsmasq 实例。
 自定义 dnsmasq `confdir`/`conf-file` 中的上游配置不由 UCI 管理，需先移除。
 
 实现使用 OpenWrt [https-dns-proxy 的 UCI 接口](https://github.com/openwrt/packages/tree/master/net/https-dns-proxy)，
-关闭其自动 dnsmasq 更新和强制 DNS 规则，仅保留本套件原有的 LAN 53 重定向范围。
+关闭其自动 dnsmasq 更新和强制 DNS 规则；本套件仅在显式启用接管时创建 LAN 53 重定向。
 
 ### 没覆盖的
 
@@ -192,10 +207,11 @@ dnsmasq 原上游保存在各实例的 `av_doh_*` UCI 选项；重复应用不�
 
 ### 代价
 
-需要运行 DoH 代理，增加 HTTPS 请求开销。客户端无法再用自定义 DNS
-（比如自带广告过滤的解析器），原分域上游也会暂停。DoH 不可达、TLS 时间/证书
+需要运行 DoH 代理，增加 HTTPS 请求开销。默认允许客户端使用自定义 DNS；只有启用
+强制接管才限制客户端的普通 DNS，并可能干扰 Clash 类客户端。dnsmasq 原分域上游
+在 DoH 启用期间会暂停。DoH 不可达、TLS 时间/证书
 错误或校园网认证前禁止 HTTPS 时，外部域名解析会失败；门户可使用 IP 地址配置，
-也可关闭 DNS 收敛恢复原上游后完成认证。启用前应验证网络可访问所选端点。
+也可关闭路由器 DoH 恢复原上游后完成认证。启用前应验证网络可访问所选端点。
 
 ## DHCP 伪装
 
@@ -286,7 +302,7 @@ RA 还在的话，每次通告都会把 lifetime 刷新回满值；RA 停了则�
 |---|---|---|---|
 | TTL | IPv4 TTL | `/etc/nftables.d/20-ttl-normalize.nft` | `uci set autoverify.ttl.enabled` |
 | NTP | LAN `udp/123` | UCI `firewall.ntp_converge` | `uci set autoverify.ntp.enabled` |
-| DNS | LAN `udp/tcp 53` | UCI `firewall.dns_converge_{udp,tcp}` | `uci set autoverify.dns.enabled` |
+| DNS | dnsmasq DoH；可选 LAN `udp/tcp 53` 接管 | DoH 代理；可选 `firewall.dns_converge_{udp,tcp}` | `autoverify.dns.enabled` / `autoverify.dns.redirect` |
 | DHCP | hostname / client-id / vendor-class / DHCPv6 FQDN | `network.<iface>.*` + `network.<iface>6.noclientfqdn` | `uci set autoverify.dhcp.enabled` |
 | IPv6 | LAN 不发 RA / DHCPv6 | `dhcp.lan.ra` / `dhcp.lan.dhcpv6` | `uci set autoverify.ipv6.enabled` |
 

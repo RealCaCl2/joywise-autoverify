@@ -567,17 +567,24 @@ return view.extend({
 
 		/* --------------------------------------------------------- DNS --- */
 		o = s.taboption('dns', form.SectionValue, '_dns', form.NamedSection,
-			'dns', 'hardening', _('DNS 汇聚与加密上游'));
+			'dns', 'hardening', _('路由器 DoH 与 DNS 接管'));
 		ss = o.subsection;
 		ss.addremove = false;
 		ss.anonymous = true;
 
-		o = ss.option(form.Flag, 'enabled', _('启用'),
-			_('把 LAN 的 udp/tcp 53 重定向到路由器的 dnsmasq。' +
-			  'dnsmasq 的上游统一通过本机 https-dns-proxy 使用 DoH，不回退明文 DNS。' +
-			  '注意：浏览器启用 DoH 时走 443，本项覆盖不到。'));
+		o = ss.option(form.Flag, 'enabled', _('路由器使用 DoH'),
+			_('dnsmasq 的上游通过本机 https-dns-proxy 使用 DoH，不回退明文 DNS。' +
+			  '使用路由器作为 DNS 的设备会走此上游；默认允许客户端使用自己的 DNS。'));
 		o.default = '1';
 		o.rmempty = false;
+
+		o = ss.option(form.Flag, 'redirect', _('强制接管局域网 DNS'),
+			_('把 LAN 发往外部的 UDP/TCP 53 查询重定向到路由器。默认关闭。' +
+			  '可能与 Clash、TUN 或私有 VPN 客户端冲突；不覆盖客户端自己的 DoH。'));
+		o.default = '0';
+		o.rmempty = false;
+		o.depends('enabled', '1');
+		o.retain = true;
 
 		var dnsSection = ss;
 		var dnsSummary = E('div', { 'class': 'av-notice av-dns-summary', 'role': 'status', 'aria-live': 'polite' });
@@ -588,7 +595,7 @@ return view.extend({
 			return E('div', {}, [
 				dnsSummary,
 				E('div', { 'class': 'av-route', 'aria-label': _('DNS 解析链路') }, [
-					E('span', {}, _('客户端 DNS')), '→', E('span', {}, 'dnsmasq'), '→', E('span', {}, _('DoH 上游'))
+					E('span', {}, _('使用路由器 DNS 的查询')), '→', E('span', {}, 'dnsmasq'), '→', E('span', {}, _('DoH 上游'))
 				]),
 				E('div', { 'class': 'av-hint' }, _('DoH 失败时不回退明文 DNS。修改后点击“保存并应用”生效。'))
 			]);

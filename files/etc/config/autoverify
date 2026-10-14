@@ -44,6 +44,8 @@ config hardening 'ntp'
 
 config hardening 'dns'
 	option enabled '1'
+	# DoH 与 LAN DNS 接管分开。默认允许客户端使用自己的 DNS（兼容 Clash）。
+	option redirect '0'
 	# 预设: tencent / aliyun / custom。普通查询只走 DoH。
 	option doh_provider 'tencent'
 	# 以下仅用于 custom；bootstrap 只解析 DoH 服务域名。

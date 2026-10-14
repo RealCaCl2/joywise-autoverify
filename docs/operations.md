@@ -108,6 +108,11 @@ ls -la /var/run/autoverify
 
 ## 6. TTL、DNS、NTP、DHCP 和 IPv6
 
+VPN/Clash 兼容模式：启用 `autoverify.dns.enabled=1`，设置
+`autoverify.dns.redirect=0`，提交后运行 `autoverify-apply`。
+这会保留路由器 DoH 并清理旧 LAN 53 重定向。旧配置缺少 `redirect` 也按关闭处理。
+LuCI 对应“路由器使用 DoH”开启、“强制接管局域网 DNS”关闭。
+
 查看配置开关与系统实际状态：
 
 ~~~sh
