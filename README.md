@@ -8,7 +8,7 @@
 > 兼容性说明：项目展示名已更名为 `joywise-autoverify`；为兼容已安装设备，运行时命令、APK
 > 包名和 UCI 配置命名空间仍保留 `autoverify`。
 
-纯 POSIX sh 实现，无编译依赖，运行时仅需 `curl`。断线自动重认证，出口接口 up 时立即认证。
+纯 POSIX sh 实现，无编译依赖，认证核心使用 `curl`。断线自动重认证，出口接口 up 时立即认证。
 
 > 门户地址由响应中的 `/zportal/` 自动识别，多数 zportal 学校无需修改代码。
 
@@ -19,15 +19,20 @@
 - 本项目**仅实现认证自动化**。校园网通常按 IP 计会话，路由器 NAT 后方的多台设备共用
   同一个已认证 IP，该行为在**多数学校的用户协议中属于明确禁止项**。
 - `autoverify-hardening`（TTL 归一化 / NTP 收敛 / DNS 收敛 / DHCP 伪装 / IPv6 防护）
-
-DNS 收敛启用后，上游统一由 `https-dns-proxy` 走 DoH，不回退明文 DNS。
-LuCI 提供腾讯云 DNSPod（默认）、阿里云公共 DNS 和自定义三个预设，使用域名 DoH 端点。
-Bootstrap DNS 仅解析 DoH 服务域名；关闭功能时恢复原上游。详见 [DNS 收敛说明](docs/hardening.md)。
   属于**主动对抗多设备检测**的措施，使用它**可能违反所在学校的网络使用规定**，后果由使用者自行承担。
 - 上述措施**均可被绕过，且不保证有效**。其原理与自检方法见
   [docs/detection.md](docs/detection.md)。
 - **请仅在具有使用权的账号与网络上运行本程序。**
 - 作者不对使用本项目所产生的任何后果承担责任。
+
+DNS 收敛启用后，上游统一由 `https-dns-proxy` 走 DoH，不回退明文 DNS。
+LuCI 提供腾讯云 DNSPod（默认）、阿里云公共 DNS 和自定义三个预设，使用域名 DoH 端点。
+Bootstrap DNS 仅解析 DoH 服务域名；关闭功能时恢复原上游。详见 [DNS 收敛说明](docs/hardening.md)。
+
+**DNS DoH 的设备前提**：必须安装 `https-dns-proxy`（本机 DoH 代理）和 `ca-bundle`
+（TLS 证书），并运行 dnsmasq。APK 已声明代理和证书依赖，通过 `apk add` 安装套件时
+会自动安装缺少的依赖。仅手动复制脚本时，需要先执行
+`apk add https-dns-proxy ca-bundle`。安装依赖后，在 LuCI 的“DNS 与 DoH”中启用汇聚并保存应用。
 
 ---
 

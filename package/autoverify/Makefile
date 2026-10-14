@@ -29,7 +29,8 @@ define Package/autoverify
 endef
 
 define Package/autoverify/description
-  校园网门户 (zportal) 自动认证, 纯 POSIX sh 实现, 运行时只需要 curl。
+  校园网门户 (zportal) 自动认证, 纯 POSIX sh 实现, 认证核心使用 curl。
+  DNS DoH 上游需要 https-dns-proxy 与 ca-bundle, 由本包依赖自动安装。
   断线自动重认证, 出口接口 up 时立即认证, 失败按指数退避避免触发门户验证码。
 
   附带针对校园网多设备检测的反制措施(均可单独开关):
