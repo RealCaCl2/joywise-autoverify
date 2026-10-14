@@ -1,5 +1,13 @@
 # joywise-autoverify 开发计划
 
+## 2026-10-14：CI SDK 下载失败修复
+
+- [x] Actions 日志确认下载仅 19,232 字节，zstd 不识别归档，未进入包编译。
+- [x] 为镜像索引、SHA256、zstd 校验失败增加官方源回退，校验完成再解压入缓存。
+- [x] 增加五项离线下载回归，并让 CI 使用官方源。
+- [x] 在新目录实际下载 SDK、构建 APK，五项离线下载回归通过。
+- [ ] 推送并确认 GitHub Actions 结果。
+
 ## 2026-10-14：DoH 与 LAN DNS 接管拆分
 
 - [x] 保留 `dns.enabled` 控制 DoH，新增 `dns.redirect` 控制 LAN 53 重定向，缺失时默认关闭。

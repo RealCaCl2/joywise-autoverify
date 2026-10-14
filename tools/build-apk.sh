@@ -21,7 +21,26 @@ MIRROR="${MIRROR:-https://mirrors.ustc.edu.cn/openwrt}"
 WORK="${WORK:-$HOME/openwrt-apk-build}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-SDK_URL="${MIRROR}/releases/${VER}/targets/${TARGET}/${SUBTARGET}/"
+OFFICIAL="https://downloads.openwrt.org"
+
+# 镜像可能返回 HTTP 200 的 HTML 验证页，不能把 curl 成功当作下载成功。
+# 每个源单独获取索引、校验和及归档，避免跨源续传混入错误内容。
+fetch_sdk_from() {
+	local base="$1/releases/${VER}/targets/${TARGET}/${SUBTARGET}/"
+	local actual expected
+	echo "==> 查询 SDK: $base"
+	curl -fsSL --connect-timeout 20 --max-time 120 "${base}" -o sdk.index || return 1
+	actual=$(grep -oE 'openwrt-sdk-[A-Za-z0-9_.+-]+\.tar\.zst' sdk.index | sed -n '1p')
+	[ -n "$actual" ] || { echo '!! 目录索引中没有 SDK' >&2; return 1; }
+	curl -fsSL --connect-timeout 20 --max-time 120 "${base}sha256sums" -o sdk.sha256sums || return 1
+	expected=$(awk -v name="$actual" '$2 == name || $2 == "*" name {print $1; exit}' sdk.sha256sums)
+	[[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo '!! 找不到 SDK SHA256' >&2; return 1; }
+	echo "==> 下载 $actual"
+	curl -fL --retry 3 --connect-timeout 20 --max-time 900 -o sdk.tar.zst.part "${base}${actual}" || return 1
+	printf '%s  sdk.tar.zst.part\n' "$expected" | sha256sum -c - || return 1
+	zstd -tq sdk.tar.zst.part || return 1
+	mv sdk.tar.zst.part sdk.tar.zst
+}
 
 echo "==> 仓库: $REPO"
 echo "==> 版本: $VER  目标: $TARGET/$SUBTARGET"
@@ -33,22 +52,19 @@ cd "$WORK"
 
 # --- 1. 下载并解压 SDK -------------------------------------------------------
 if [ ! -d sdk ]; then
-	echo "==> 查询 SDK 包名"
-	# 文件名带 gcc 版本号, 从目录索引里查实际文件名
-	_actual=$(curl -fsSL "$SDK_URL" | grep -oE 'openwrt-sdk-[^"]*\.tar\.zst' | head -1)
-	if [ -z "$_actual" ]; then
-		echo "!! 在 $SDK_URL 里找不到 SDK 包名" >&2
-		exit 1
+	if ! fetch_sdk_from "${MIRROR%/}"; then
+		if [ "${MIRROR%/}" = "$OFFICIAL" ]; then
+			echo '!! 官方源 SDK 下载或校验失败' >&2
+			exit 1
+		fi
+		echo '!! 镜像下载或校验失败，切换到 OpenWrt 官方源' >&2
+		fetch_sdk_from "$OFFICIAL" || { echo '!! 所有 SDK 下载源均失败' >&2; exit 1; }
 	fi
-	echo "    $_actual"
-	echo "==> 下载 SDK"
-	# 断点续传 + 进度; 失败时退回官方源
-	curl -L --retry 3 -C - -o sdk.tar.zst "${SDK_URL}${_actual}" \
-		|| curl -L --retry 3 -C - -o sdk.tar.zst \
-			"https://downloads.openwrt.org/releases/${VER}/targets/${TARGET}/${SUBTARGET}/${_actual}"
 	echo "==> 解压 SDK"
-	mkdir -p sdk
-	tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+	_unpack=$(mktemp -d "$WORK/sdk-unpack.XXXXXX")
+	tar --zstd -xf sdk.tar.zst -C "$_unpack" --strip-components=1
+	test -f "$_unpack/Makefile"
+	mv "$_unpack" sdk
 fi
 
 # --- 2. 放入包源码 -----------------------------------------------------------

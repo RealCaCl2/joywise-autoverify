@@ -117,7 +117,12 @@ jobs:
           sudo apt-get install -y build-essential zstd flex bison \
             libncurses-dev unzip rsync wget file gettext gawk python3
 
+      - name: SDK 下载与校验回归
+        run: python3 test/test_sdk_download.py
+
       - name: 用 OpenWrt SDK 构建
+        env:
+          MIRROR: https://downloads.openwrt.org
         run: bash tools/build-apk.sh
 
       - uses: actions/upload-artifact@v4

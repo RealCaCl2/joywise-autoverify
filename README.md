@@ -124,9 +124,10 @@ bash tools/build-apk.sh
 # 产物输出到 dist/
 ```
 
-脚本会自动下载 SDK。**默认使用 USTC 镜像** —— `downloads.openwrt.org` 在国内通常仅有
-100KB/s 量级，而 SDK 超过 200MB，下载耗时很长（实测 135KB/s，镜像 1.3MB/s）。
-可通过 `MIRROR=` 覆盖，或改为 `https://mirror.sjtu.edu.cn/openwrt`。
+脚本会自动下载 SDK。本地默认使用 USTC 镜像，可通过 `MIRROR=` 覆盖；GitHub Actions
+使用 `https://downloads.openwrt.org` 官方源，避免国内镜像验证页影响海外构建。
+下载后校验 SHA256 和 zstd 格式，再解压到缓存；镜像索引、下载或校验失败时自动切换官方源。
+不同下载源不会共用断点续传文件，避免混入 HTML 错误页面；下载速度取决于当前网络。
 
 ## 配置
 

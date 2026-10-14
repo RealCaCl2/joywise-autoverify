@@ -3,6 +3,19 @@
 > 本文件区分本地验证与真实校园网 / OpenWrt 实测；本地结果不代表设备验收。
 > 复现命令和验证范围见各条目自身。
 
+## 2026-10-14：CI SDK 下载校验修复
+
+- GitHub Actions run `38521337241` 在下载后解压阶段失败：所谓 SDK 仅 19,232 字节，
+  zstd 报 `unsupported format`，尚未进入编译。本地已有 SDK 缓存未覆盖该路径。
+- 构建脚本增加独立下载、SHA256 与 zstd 校验，以及镜像索引 / 下载 / 校验失败的
+  官方源回退；解压完成才建立 SDK 缓存。CI 显式使用 OpenWrt 官方源。
+- `python3 test/test_sdk_download.py` 五项离线回归通过，覆盖 HTTP 200 错误页、
+  索引失败、校验和匹配但 zstd 无效、两个源均失败、官方源正常下载。
+- 在全新 WSL 目录 `~/openwrt-apk-ci-check` 实际下载官方 25.12.5 ramips/mt7621
+  SDK，通过 SHA256 / zstd 校验、解压与 APK 编译，产出 r17。
+  `bash -n tools/build-apk.sh` 和 `git diff --check` 通过。
+- 此修复只改构建流程，不修改路由器运行文件，不需要重新安装插件。
+
 ## 2026-10-14：r17 APK 构建与 OpenWrt 升级
 
 - 复用 WSL OpenWrt 25.12.5 ramips/mt7621 SDK，`bash tools/build-apk.sh`
