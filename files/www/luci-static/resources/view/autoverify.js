@@ -325,7 +325,7 @@ return view.extend({
 
 	renderDnsSummary: function(provider, section) {
 		var presets = {
-			tencent: [ _('腾讯云 DNSPod'), 'https://doh.pub/dns-query', '119.29.29.29' ],
+			tencent: [ _('腾讯云 DNSPod'), 'https://doh.pub/dns-query', '119.29.29.29,182.254.116.116' ],
 			aliyun: [ _('阿里云公共 DNS'), 'https://dns.alidns.com/dns-query', '223.5.5.5,223.6.6.6' ]
 		};
 		var preset = presets[provider];
@@ -433,8 +433,10 @@ return view.extend({
 
 		o = ss.option(form.DynamicList, 'probe_urls', _('连通性探测地址'),
 			_('未认证时这些地址会被 NAS 劫持并引导到门户。' +
-			  '判定"在线" = 状态码等于下面的期望值，且没有被重定向。'));
-		o.placeholder = 'http://connect.rom.miui.com/generate_204';
+			  '判定"在线" = 状态码等于下面的期望值，且没有被重定向。' +
+			  '探测走明文 HTTP，地址本身也会被看见：建议与伪装人设一致，' +
+			  '例如 Windows + Chrome 用 gstatic 的 generate_204，不要混用多家手机厂商的探测地址。'));
+		o.placeholder = 'http://www.gstatic.com/generate_204';
 		o.rmempty = false;
 
 		o = ss.option(form.Value, 'user_agent', _('请求 User-Agent'),
@@ -472,6 +474,12 @@ return view.extend({
 				return _('重试间隔上限不能小于失败重试间隔');
 			return true;
 		};
+
+		o = ss.option(form.Value, 'login_delay', _('登录提交延迟'),
+			_('秒，0 = 关闭。真实浏览器从打开登录页到提交至少需要数秒；' +
+			  '这里会在 1 到该值之间随机等待，避免“抓完页面立即提交”的脚本特征。'));
+		o.default = '2';
+		o.datatype = 'range(0,10)';
 
 		o = ss.option(form.Flag, 'verbose', _('详细日志'),
 			_('每次探测都写日志，排障用。也可以临时执行 autoverify -v once。'));
@@ -578,6 +586,16 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		o = ss.option(form.ListValue, 'mode', _('启用时机'),
+			_('多数校园网认证前只放行 HTTP，DoH 走 443 会连不上，提前接管反而让门户探测失败。' +
+			  '“认证成功后”会先保留网络下发的明文 DNS 完成认证，验证在线后再切到 DoH；' +
+			  '切换失败会自动回退，不会让路由器断 DNS。'));
+		o.value('post_auth', _('认证成功后启用（推荐）'));
+		o.value('always', _('始终启用'));
+		o.default = 'post_auth';
+		o.rmempty = false;
+		o.depends('enabled', '1');
+
 		o = ss.option(form.Flag, 'redirect', _('强制接管局域网 DNS'),
 			_('把 LAN 发往外部的 UDP/TCP 53 查询重定向到路由器。默认关闭。' +
 			  '可能与 Clash、TUN 或私有 VPN 客户端冲突；不覆盖客户端自己的 DoH。'));
@@ -597,7 +615,7 @@ return view.extend({
 				E('div', { 'class': 'av-route', 'aria-label': _('DNS 解析链路') }, [
 					E('span', {}, _('使用路由器 DNS 的查询')), '→', E('span', {}, 'dnsmasq'), '→', E('span', {}, _('DoH 上游'))
 				]),
-				E('div', { 'class': 'av-hint' }, _('DoH 失败时不回退明文 DNS。修改后点击“保存并应用”生效。'))
+				E('div', { 'class': 'av-hint' }, _('认证前使用网络下发的明文 DNS；认证成功后再切到 DoH。DoH 启动或解析失败会立即回退，不会让路由器断 DNS。修改后点击“保存并应用”生效。'))
 			]);
 		};
 
@@ -632,15 +650,20 @@ return view.extend({
 		};
 
 		o = ss.option(form.Value, 'doh_bootstrap', _('Bootstrap DNS'),
-			_('仅用于解析 DoH 服务域名，使用明文 DNS；填写 IPv4 地址，以逗号分隔。普通查询不回退到这里。'));
-		o.default = '119.29.29.29';
+			_('仅用于解析 DoH 服务域名，使用明文 DNS；填写 IPv4 地址，以逗号分隔。' +
+			  '至少填两个：https-dns-proxy 在只有一个 bootstrap 时会崩溃。普通查询不会回退到这里。'));
+		o.default = '119.29.29.29,182.254.116.116';
 		o.rmempty = false;
 		o.retain = true;
 		o.depends({ enabled: '1', doh_provider: 'custom' });
 		o.validate = function(section_id, value) {
-			return value.split(',').every(function(ip) {
+			var ips = value.split(',');
+			var valid = ips.every(function(ip) {
 				return /^(\d+\.){3}\d+$/.test(ip) && ip.split('.').every(function(n) { return Number(n) <= 255; });
-			}) ? true : _('请输入逗号分隔的 IPv4 地址');
+			});
+			if (!valid)
+				return _('请输入逗号分隔的 IPv4 地址');
+			return ips.length >= 2 ? true : _('至少需要两个 Bootstrap DNS');
 		};
 
 		/* -------------------------------------------------------- DHCP --- */

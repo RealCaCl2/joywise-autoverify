@@ -79,6 +79,7 @@ status)
 	printf '  TTL 归一化 : %s  值=%s\n' "$(_bool ttl)" "$(av_cfg ttl ttl 64)"
 	printf '  NTP 收敛   : %s\n' "$(_bool ntp)"
 	printf '  路由器 DoH : %s\n' "$(_bool dns)"
+	printf '  DoH 时机   : %s\n' "$(dns_doh_mode)"
 	printf '  DNS 接管配置: %s (仅 DoH 启用时生效)\n' "$(av_cfg_bool dns redirect 0)"
 	if dns_doh_url; then
 		printf '  DoH 上游   : %s (%s)\n' "$_doh_url" "$_doh_provider"
@@ -104,6 +105,11 @@ status)
 	fi
 	printf '  dnsmasq 53 : %s 个 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE ':53[[:space:]]')"
 	printf '  DoH 代理   : %s 个 127.0.0.1:5053 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE '127\.0\.0\.1:5053[[:space:]]')"
+	if dns_doh_active; then
+		echo '  DoH 接管   : 已生效 (dnsmasq -> 127.0.0.1:5053)'
+	else
+		echo '  DoH 接管   : 未接管 (认证前保持网络下发的明文上游)'
+	fi
 	printf '  ntpd 123   : %s 个 udp 监听\n' "$(netstat -lnu 2>/dev/null | grep -cE ':123[[:space:]]')"
 	# DHCP 伪装与 IPv6 防护落在 network / dhcp 两个包自己的配置里,
 	# 所以要看的不是 UCI 开关而是系统里实际生效的值。

@@ -131,7 +131,13 @@ apply_dns() {
 			log "本机 53 端口没有监听(dnsmasq 没跑?)，跳过路由器 DoH"
 			return 1
 		fi
-		dns_doh_apply || return 1
+		if [ "$(dns_doh_mode)" = "post_auth" ]; then
+			# 认证前必须保留网络下发的明文上游: 门户普遍只放行 HTTP,
+			# DoH 走 443 会连不上, 提前接管会让认证本身无法完成。
+			dns_doh_restore || return 1
+		else
+			dns_doh_apply || return 1
+		fi
 		if [ "$(av_cfg_bool dns redirect 0)" = "1" ]; then
 			_ip=$(lan_ip) || { log "读不到 network.lan.ipaddr，无法接管 LAN DNS"; return 1; }
 			add_dns_redirect "$DNS_SEC_UDP" udp

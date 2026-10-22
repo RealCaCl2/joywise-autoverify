@@ -90,12 +90,14 @@ esac
                         DNS_DOH_INIT=str(self.service),
                         DNS_TEST_CALLS=str(self.root / 'calls'),
                         DNS_TEST_ORIGINAL_RUNNING='1', DNS_TEST_FAIL='0', DNS_TEST_LISTEN='1',
-                        DNS_TEST_DNSMASQ='1', DNS_TEST_LAN_IP='192.168.1.1')
+                        DNS_TEST_DNSMASQ='1', DNS_TEST_LAN_IP='192.168.1.1',
+                        DNS_TEST_HTTPS='200', DNS_TEST_QUERY='1')
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_shell(self, command, url='', provider='tencent', bootstrap='119.29.29.29'):
+    def run_shell(self, command, url='', provider='tencent', bootstrap='119.29.29.29',
+                  mode='post_auth', enabled='1'):
         helper = Path(__file__).resolve().parents[1] / 'files/usr/lib/autoverify/dns.sh'
         quote = lambda p: shlex.quote(str(p).replace('\\', '/'))
         script = (f'uci() {{ {quote(sys.executable)} {quote(Path(__file__).resolve())} uci "$@"; }}\n'
@@ -103,8 +105,15 @@ esac
                   f'doh_provider) printf "%s\\n" {shlex.quote(provider)} ;;\n'
                   f'doh_url) printf "%s\\n" {shlex.quote(url)} ;;\n'
                   f'doh_bootstrap) printf "%s\\n" {shlex.quote(bootstrap)} ;;\n'
+                  f'mode) printf "%s\\n" {shlex.quote(mode)} ;;\n'
+                  f'enabled) printf "%s\\n" {shlex.quote(enabled)} ;;\n'
                   'esac; }\n'
+                  'av_cfg_bool() { _v=$(av_cfg "$1" "$2" "$3"); '
+                  '[ "$_v" = 1 ] && echo 1 || echo 0; }\n'
                   'log() { echo "$*" >&2; }\n'
+                  'curl() { printf "%s\\n" "${DNS_TEST_HTTPS:-200}"; }\n'
+                  'nslookup() { [ "$DNS_TEST_QUERY" = 1 ] && '
+                  'printf "Name: www.baidu.com\\nAddress 1: 1.2.3.4\\n"; }\n'
                   'netstat() {\n'
                   '[ "$DNS_TEST_DNSMASQ" = 1 ] && echo "udp 0 0 0.0.0.0:53 0.0.0.0:*";\n'
                   '[ "$DNS_TEST_LISTEN" = 1 ] && echo "udp 0 0 127.0.0.1:5053 0.0.0.0:*"; }\n'
@@ -117,16 +126,21 @@ esac
     def db(self):
         return json.loads(self.db_path.read_text())
 
-    def run_apply(self, enabled='1', redirect=None):
+    def run_apply(self, enabled='1', redirect=None, mode='always'):
         db = self.db()
         db['autoverify.dns.enabled'] = enabled
         db.pop('autoverify.dns.redirect', None)
         if redirect is not None:
             db['autoverify.dns.redirect'] = redirect
         self.db_path.write_text(json.dumps(db))
+        self.env['DNS_TEST_MODE'] = mode
         source = (Path(__file__).resolve().parents[1] / 'files/usr/sbin/autoverify-apply').read_text(encoding='utf-8')
         function = source.split('apply_dns() {', 1)[1].split('# --------------------------------------------------------------- DHCP', 1)[0]
         return self.run_shell('''
+av_cfg() { case "$2" in
+mode) printf '%s\\n' "$DNS_TEST_MODE" ;;
+doh_provider) printf '%s\\n' tencent ;;
+esac; }
 av_cfg_bool() { uci -q get "autoverify.$1.$2" || printf '%s\\n' "$3"; }
 lan_ip() { [ -n "$DNS_TEST_LAN_IP" ] && echo "$DNS_TEST_LAN_IP"; }
 DNS_SEC_UDP=dns_converge_udp
@@ -200,7 +214,8 @@ apply_dns() {''' + function + '\napply_dns')
             self.assertEqual(db['https-dns-proxy.config.dnsmasq_config_update'], '-')
             self.assertEqual(db['https-dns-proxy.config.force_dns'], '0')
             self.assertEqual(db['https-dns-proxy.autoverify.resolver_url'], 'https://doh.pub/dns-query')
-            self.assertEqual(db['https-dns-proxy.autoverify.bootstrap_dns'], '119.29.29.29')
+            self.assertEqual(db['https-dns-proxy.autoverify.bootstrap_dns'],
+                             '119.29.29.29,182.254.116.116')
         result = self.run_shell('dns_doh_restore; dns_doh_restore')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.db(), self.initial)
@@ -238,7 +253,8 @@ apply_dns() {''' + function + '\napply_dns')
             self.assertEqual(result.returncode, 0, result.stderr)
             db = self.db()
             self.assertEqual(db['https-dns-proxy.autoverify.resolver_url'], expected)
-            expected_bootstrap = {'aliyun': '223.5.5.5,223.6.6.6', 'tencent': '119.29.29.29'}.get(provider, bootstrap)
+            expected_bootstrap = {'aliyun': '223.5.5.5,223.6.6.6',
+                                  'tencent': '119.29.29.29,182.254.116.116'}.get(provider, bootstrap)
             self.assertEqual(db['https-dns-proxy.autoverify.bootstrap_dns'], expected_bootstrap)
             self.assertEqual(db['dhcp.other.server'], ['127.0.0.1#5053'])
         self.assertEqual(self.run_shell('dns_doh_restore').returncode, 0)
@@ -260,6 +276,67 @@ apply_dns() {''' + function + '\napply_dns')
         self.env['DNS_DOH_INIT'] = str(self.root / 'missing')
         self.assertNotEqual(self.run_shell('dns_doh_apply').returncode, 0)
         self.assertEqual(self.db(), self.initial)
+
+    def test_post_auth_switches_after_auth_and_restores_before_auth(self):
+        # 认证前: 明文上游。认证成功后切 DoH；再次认证前恢复。
+        self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        # 幂等: 已接管时不再重复 apply / restart。
+        self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.run_shell('dns_doh_before_auth').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+
+    def test_post_auth_skips_when_https_blocked(self):
+        self.env['DNS_TEST_HTTPS'] = '000'
+        self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+
+    def test_post_auth_rolls_back_when_dns_query_fails(self):
+        self.env['DNS_TEST_QUERY'] = '0'
+        self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+        self.assertTrue((self.root / 'state/fail').exists())
+        calls = (self.root / 'calls').read_text().splitlines()
+        self.assertIn('stop', calls)
+
+    def test_post_auth_cooldown_skips_retry(self):
+        self.env['DNS_TEST_QUERY'] = '0'
+        self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.env['DNS_TEST_QUERY'] = '1'
+        self.env['DNS_TEST_HTTPS'] = '200'
+        # 失败标记在冷却期内，即使条件恢复也不再重启 dnsmasq。
+        self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.db(), self.initial)
+
+    def test_always_mode_never_defers(self):
+        self.assertEqual(self.run_shell('dns_doh_after_auth', mode='always').returncode, 0)
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+        self.assertEqual(self.db(), self.initial)
+
+    def test_restore_recovers_without_proxy_backup(self):
+        self.assertEqual(self.run_shell('dns_doh_apply').returncode, 0)
+        # proxy.uci 丢失（手工清理/升级残留）时, 仍要把 dnsmasq 从 5053 拉回来。
+        (self.root / 'state/proxy.uci').unlink()
+        self.assertEqual(self.run_shell('dns_doh_restore').returncode, 0)
+        db = self.db()
+        for key, value in self.initial.items():
+            if key.startswith('dhcp.'):
+                self.assertEqual(db.get(key), value, key)
+        for key in ('dhcp.@dnsmasq[0].noresolv', 'dhcp.other.av_doh_saved'):
+            self.assertNotIn(key, db)
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+
+    def test_post_auth_apply_keeps_plain_dns(self):
+        # 先按 always 接管, 再切到 post_auth 应用配置: 必须恢复明文上游。
+        self.assertEqual(self.run_apply(mode='always').returncode, 0)
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertEqual(self.run_apply(mode='post_auth').returncode, 0)
+        restored = {k: v for k, v in self.db().items() if not k.startswith('autoverify.')}
+        self.assertEqual(restored, self.initial)
 
 
 if __name__ == '__main__':

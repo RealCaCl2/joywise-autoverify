@@ -26,8 +26,11 @@
 - 作者不对使用本项目所产生的任何后果承担责任。
 
 路由器 DoH 启用后，dnsmasq 上游由 `https-dns-proxy` 走 DoH，不回退明文 DNS。
+默认 `dns.mode=post_auth`：认证前保留网络下发的明文 DNS，认证并验证在线后才切到 DoH。
+多数校园网认证前只放行 HTTP，DoH 走 443 根本连不上，提前接管会让门户探测拿到
+HTTP 000、永远无法认证。需要维持旧行为时设为 `always`。
 默认不接管局域网 DNS：使用路由器 DNS 的设备享用 DoH，Clash 等客户端可以使用自己的解析器。
-`dns.enabled` 控制 DoH，新增 `dns.redirect` 控制强制接管 LAN UDP/TCP 53，默认 `0`。
+`dns.enabled` 控制 DoH，`dns.redirect` 控制强制接管 LAN UDP/TCP 53，默认 `0`。
 旧配置缺少 `redirect` 时也默认关闭接管，下次应用会清理插件旧规则；已有 DoH 开关保持不变。
 LuCI 提供腾讯云 DNSPod（默认）、阿里云公共 DNS 和自定义三个预设，使用域名 DoH 端点。
 Bootstrap DNS 仅解析 DoH 服务域名；关闭功能时恢复原上游。详见 [DNS 收敛说明](docs/hardening.md)。
@@ -153,7 +156,7 @@ uci commit autoverify
 |---|---|---|
 | `main` | `enabled` / `username` / `password` | 开关与账号 |
 | `portal` | `host` / `port` / `url` | 门户地址 |
-| `tuning` | `probe_urls` / `expect_code` / `http_timeout` / `check_interval` / `retry_interval` / `max_retry_interval` / `verbose` | 探测与轮询 |
+| `tuning` | `probe_urls` / `expect_code` / `http_timeout` / `check_interval` / `retry_interval` / `max_retry_interval` / `login_delay` / `verbose` | 探测与轮询 |
 | `network` | `wan_if` / `hotplug_if` / `lan_dev` | 接口 |
 | `ttl` / `ntp` / `dns` / `dhcp` / `ipv6` | `enabled` 等 | 反检测措施，见 **[docs/hardening.md](docs/hardening.md)** |
 
@@ -235,7 +238,7 @@ origin、非 HTTP(S) 地址、过长地址，并会把 `nextPage` 请求的 curl
 == 配置 ==
   来源            : UCI /etc/config/autoverify
   账号            : 20230001
-  探测地址        : http://connect.rom.miui.com/generate_204 ...
+  探测地址        : http://www.gstatic.com/generate_204
   WAN 接口        : phy1-sta0
   该接口 IP       : 10.80.3.64
   该接口 MAC      : AABB-CCDD-EEFF

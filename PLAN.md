@@ -1,5 +1,31 @@
 # joywise-autoverify 开发计划
 
+## 2026-10-22：DoH 改为认证成功后启用
+
+- [x] 实机定位：认证前 HTTPS/443 被校园网拦截，而 dnsmasq 已被强制指向
+      `127.0.0.1:5053`，DoH 代理又因单 bootstrap 崩溃，导致 DNS 全断、
+      门户探测返回 HTTP 000、报 `E_PORTAL_NOT_FOUND`。
+- [x] 新增 `dns.mode=post_auth`（默认）：认证前保留网络下发的明文 DNS，
+      认证并验证在线后再切 DoH；每次需要重新认证前先恢复明文上游。
+- [x] 切换改为事务式：HTTPS 可达检查 → 代理监听 → 重启 dnsmasq → `nslookup`
+      验证整链路；任一步失败立即回退明文上游，并进入 10 分钟冷却。
+- [x] tencent 预设的 bootstrap 改为两个地址，规避 https-dns-proxy +
+      c-ares 单 nameserver 崩溃；`custom` 与校验同步要求至少两个。
+- [x] `dns_doh_restore` 支持 `proxy.uci` 丢失时仅凭 dnsmasq 接管标记恢复，
+      避免升级/手工清理后上游永久停在 `127.0.0.1#5053`。
+- [x] 更新 LuCI、`autoverify-hardening status`、配置模板与文档。
+- [x] 决策：保持 flow offloading 开启；LAN DNS 继续不强制接管
+      （`dns.redirect=0`）。TTL 只覆盖未卸载的连接，作为已知残留记录。
+- [x] 探测地址改为 Chrome 的 `gstatic/generate_204`；探测、登录 GET/POST、
+      nextPage 补 `Accept` / `Accept-Language` / `Sec-Fetch-*` 等浏览器请求头。
+- [x] 新增 `tuning.login_delay`（默认 2s，1..上限随机），轮询 ±15%、退避 ±20%
+      抖动，探测地址顺序随机化。
+- [x] 完整改进清单持久化到 `docs/hardening-backlog.md`。
+- [x] 本地 DNS 20 项与完整认证回归通过；实机认证成功后切换 DoH、
+      before/after 切换与 reload 路径通过。
+- [ ] APK r18 构建与 apk 升级验证；LuCI 页面浏览器渲染验收。
+- [ ] 新探测地址/请求头/登录延迟的实机认证验证。
+
 ## 2026-10-14：CI SDK 下载失败修复
 
 - [x] Actions 日志确认下载仅 19,232 字节，zstd 不识别归档，未进入包编译。

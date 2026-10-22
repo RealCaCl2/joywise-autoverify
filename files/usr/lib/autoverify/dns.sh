@@ -1,7 +1,67 @@
 #!/bin/sh
 # DNS 上游接管：备份一次、只走 DoH、关闭时恢复。目标为 BusyBox ash。
+#
+# dns.mode=always    - 服务启动/应用配置时就接管 dnsmasq 上游（旧行为）。
+# dns.mode=post_auth - 认证前保留网络下发的明文 DNS，认证并验证在线后再切 DoH。
+#                      多数校园网认证前只放行 HTTP，DoH 走 443 根本连不上；
+#                      提前接管只会让门户探测拿到 HTTP 000，形成死锁。
 DNS_DOH_STATE=${DNS_DOH_STATE:-/etc/autoverify-dns}
 DNS_DOH_INIT=${DNS_DOH_INIT:-/etc/init.d/https-dns-proxy}
+DNS_DOH_FAIL_MARK="$DNS_DOH_STATE/fail"
+DNS_DOH_RETRY_SEC=${DNS_DOH_RETRY_SEC:-600}
+
+dns_doh_mode() {
+	case "$(av_cfg dns mode post_auth)" in
+		always)    printf 'always\n' ;;
+		*)
+			# 未配置或拼写错误时按更安全的一侧处理：认证前不接管。
+			printf 'post_auth\n'
+			;;
+	esac
+}
+
+# DoH 接管是否处于生效状态（proxy.uci 只在接管期间存在）。
+dns_doh_active() {
+	[ -f "$DNS_DOH_STATE/proxy.uci" ]
+}
+
+dns_restart_dnsmasq() {
+	[ -x /etc/init.d/dnsmasq ] || return 0
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
+# 认证后先确认 HTTPS 真的放行了，再动 dnsmasq。
+# 有些校园网即使认证成功也只放行 HTTP，贸然切 DoH 会立刻断掉所有解析。
+dns_https_ready() {
+	dns_doh_url || return 1
+	_code=$(curl -s -o /dev/null -m 5 -A "${USER_AGENT:-Mozilla/5.0}" \
+		-w '%{http_code}' "$_doh_url" 2>/dev/null)
+	case "$_code" in
+		''|000) return 1 ;;
+		*)      return 0 ;;
+	esac
+}
+
+# 切换后真正查一次域名，确认 dnsmasq -> 5053 -> DoH 整条链路可用。
+# 极简 BusyBox 可能没编译 nslookup，此时跳过这项检查，不因此禁用 DoH。
+dns_query_ok() {
+	command -v nslookup >/dev/null 2>&1 || return 0
+	_out=$(nslookup www.baidu.com 127.0.0.1 2>/dev/null) || return 1
+	printf '%s\n' "$_out" | grep -q 'Name:'
+}
+
+# 切换失败后冷却一段时间，避免守护进程每个周期都重启一次 dnsmasq。
+dns_doh_retry_allowed() {
+	[ -f "$DNS_DOH_FAIL_MARK" ] || return 0
+	_mtime=$(date -r "$DNS_DOH_FAIL_MARK" +%s 2>/dev/null) || return 0
+	_now=$(date +%s 2>/dev/null) || return 0
+	[ $((_now - _mtime)) -ge "$DNS_DOH_RETRY_SEC" ]
+}
+
+dns_doh_mark_fail() {
+	(umask 077; mkdir -p "$DNS_DOH_STATE" 2>/dev/null; : > "$DNS_DOH_FAIL_MARK") 2>/dev/null
+	return 0
+}
 
 dnsmasq_sections() {
 	uci -q show dhcp | sed -n 's/^\(dhcp\.[^.]*\)=dnsmasq$/\1/p'
@@ -12,7 +72,10 @@ dns_doh_url() {
 	case "$_doh_provider" in
 		tencent)
 			_doh_url='https://doh.pub/dns-query'
-			_doh_bootstrap='119.29.29.29'
+			# https-dns-proxy 2026.05.06 + c-ares 1.34 只给一个 bootstrap
+			# 时会在 dns_poller.c 里直接 abort（需要的 IO handler 比 nameserver 多）。
+			# 两个都是 DNSPod 公共 DNS，不是猜测的第三方地址。
+			_doh_bootstrap='119.29.29.29,182.254.116.116'
 			;;
 		aliyun)
 			_doh_url='https://dns.alidns.com/dns-query'
@@ -47,8 +110,19 @@ dns_doh_url() {
 }
 
 dns_doh_restore() {
-	[ -f "$DNS_DOH_STATE/proxy.uci" ] || return 0
-	"$DNS_DOH_INIT" stop || return 1
+	_have_proxy=0
+	[ -f "$DNS_DOH_STATE/proxy.uci" ] && _have_proxy=1
+	_saved=0
+	for _dm in $(dnsmasq_sections); do
+		[ "$(uci -q get "$_dm.av_doh_saved")" = 1 ] && _saved=1
+	done
+	# 没有备份也没有接管标记时什么都不做。
+	# 但只剩 dnsmasq 标记（proxy.uci 被手工删掉）也要恢复，否则上游永远停在
+	# 127.0.0.1#5053，而代理根本没在跑。
+	[ "$_have_proxy" = 1 ] || [ "$_saved" = 1 ] || return 0
+	if [ -x "$DNS_DOH_INIT" ]; then
+		"$DNS_DOH_INIT" stop || return 1
+	fi
 	for _dm in $(dnsmasq_sections); do
 		[ "$(uci -q get "$_dm.av_doh_saved")" = 1 ] || continue
 		for _opt in noresolv server serversfile; do
@@ -67,17 +141,20 @@ dns_doh_restore() {
 		uci -q delete "$_dm.av_doh_saved"
 	done
 	uci commit dhcp || return 1
-	uci import https-dns-proxy < "$DNS_DOH_STATE/proxy.uci" || return 1
-	uci commit https-dns-proxy || return 1
-	if [ -f "$DNS_DOH_STATE/enabled" ]; then
-		"$DNS_DOH_INIT" enable || return 1
-	else
-		"$DNS_DOH_INIT" disable || return 1
-	fi
-	if [ -f "$DNS_DOH_STATE/running" ]; then
-		"$DNS_DOH_INIT" start || return 1
+	if [ "$_have_proxy" = 1 ]; then
+		uci import https-dns-proxy < "$DNS_DOH_STATE/proxy.uci" || return 1
+		uci commit https-dns-proxy || return 1
+		if [ -f "$DNS_DOH_STATE/enabled" ]; then
+			"$DNS_DOH_INIT" enable || return 1
+		else
+			"$DNS_DOH_INIT" disable || return 1
+		fi
+		if [ -f "$DNS_DOH_STATE/running" ]; then
+			"$DNS_DOH_INIT" start || return 1
+		fi
 	fi
 	rm -f "$DNS_DOH_STATE/proxy.uci" "$DNS_DOH_STATE/enabled" "$DNS_DOH_STATE/running"
+	rm -f "$DNS_DOH_STATE/fail"
 }
 
 dns_doh_apply() {
@@ -131,13 +208,63 @@ config https-dns-proxy 'autoverify'
 EOF
 	uci commit https-dns-proxy || return 1
 	"$DNS_DOH_INIT" enable || return 1
-	"$DNS_DOH_INIT" restart || { log 'DoH 代理启动失败；保留严格上游配置，不回退明文 DNS'; return 1; }
+	"$DNS_DOH_INIT" restart || { log 'DoH 代理启动失败'; return 1; }
 	_doh_wait=0
 	while [ "$_doh_wait" -lt 5 ]; do
 		netstat -lnu 2>/dev/null | grep -qE '127\.0\.0\.1:5053[[:space:]]' && return 0
 		sleep 1
 		_doh_wait=$((_doh_wait + 1))
 	done
-	log 'DoH 代理没有监听 127.0.0.1:5053；保留严格上游配置，不回退明文 DNS'
+	log 'DoH 代理没有监听 127.0.0.1:5053'
 	return 1
+}
+
+# ------------------------------------------------- 认证前后的时机切换 -------
+#
+# post_auth 模式的两个入口:
+#   dns_doh_before_auth - 需要认证时先恢复网络下发的明文 DNS，否则门户探测
+#                         无法解析域名，只能拿到 HTTP 000。
+#   dns_doh_after_auth  - 认证并验证在线后切到 DoH；切换失败或解析测试不过
+#                         就立即回退，避免把整台路由器的 DNS 弄死。
+
+dns_doh_before_auth() {
+	[ "$(av_cfg_bool dns enabled 0)" = "1" ] || return 0
+	[ "$(dns_doh_mode)" = "post_auth" ] || return 0
+	dns_doh_active || return 0
+	if dns_doh_restore; then
+		dns_restart_dnsmasq
+		log '需要认证, 已恢复明文 DNS 上游'
+		return 0
+	fi
+	log '恢复明文 DNS 上游失败, 认证探测可能受影响'
+	return 1
+}
+
+dns_doh_after_auth() {
+	[ "$(av_cfg_bool dns enabled 0)" = "1" ] || return 0
+	[ "$(dns_doh_mode)" = "post_auth" ] || return 0
+	dns_doh_active && return 0
+	[ -x "$DNS_DOH_INIT" ] || return 0
+	dns_doh_retry_allowed || { logv 'DoH 切换仍在冷却期, 保持明文上游'; return 1; }
+	dns_https_ready || { logv '认证后 HTTPS 仍不可用, 暂不切换 DoH'; return 1; }
+
+	if ! dns_doh_apply; then
+		log '认证后启用 DoH 失败, 已回退明文上游'
+		dns_doh_restore
+		dns_restart_dnsmasq
+		dns_doh_mark_fail
+		return 1
+	fi
+	dns_restart_dnsmasq
+	sleep 1
+	if ! dns_query_ok; then
+		log 'DoH 已启动但解析测试失败, 已回退明文上游'
+		dns_doh_restore
+		dns_restart_dnsmasq
+		dns_doh_mark_fail
+		return 1
+	fi
+	rm -f "$DNS_DOH_FAIL_MARK"
+	log '已切换到 DoH 上游'
+	return 0
 }

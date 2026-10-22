@@ -101,6 +101,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         STATE["gets"].append(self.path)
         print("GET %s" % self.path, flush=True)
+        print("HDR GET %s AL=%r SF=%r" % (self.path.split("?")[0],
+                                          self.headers.get("Accept-Language"),
+                                          self.headers.get("Sec-Fetch-Site")), flush=True)
         if self.path.startswith("/__shutdown"):
             self._send(200, "shutting down")
             threading.Thread(target=SERVER.shutdown, daemon=True).start()
@@ -150,6 +153,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8", "replace")
         STATE["posts"] += 1
         print("POST %s" % self.path, flush=True)
+        print("HDR POST %s AL=%r SF=%r" % (self.path,
+                                           self.headers.get("Accept-Language"),
+                                           self.headers.get("Sec-Fetch-Site")), flush=True)
         print("  Origin: %s" % self.headers.get("Origin"), flush=True)
         print("  Content-Type: %s" % self.headers.get("Content-Type"), flush=True)
         for pair in body.split("&"):
