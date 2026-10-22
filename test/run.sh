@@ -22,6 +22,8 @@ export PORTAL_PORT="$PORT"
 export MAIN_USERNAME="20230001"
 export MAIN_PASSWORD="p@ss w0rd&x=1"   # 故意带空格和 & , 验证编码
 export TUNING_HTTP_TIMEOUT=5
+# 登录延迟只影响实机节奏, 回归里关掉, 避免每个认证用例多等 1-2 秒。
+export TUNING_LOGIN_DELAY=0
 RUN_DIR=$(mktemp -d) || exit 1
 export AUTOVERIFY_RUN_DIR="$RUN_DIR"
 export AUTOVERIFY_STATE_DIR="$RUN_DIR/persist"
@@ -230,6 +232,13 @@ if [ "$_audit_rc" = "0" ] && printf '%s\n' "$_audit_json" | "$PY" -c 'import jso
 	echo "    [OK]   audit --json 可严格解析且无敏感信息"
 else
 	echo "    [FAIL] audit --json 无法严格解析或泄露敏感信息"; FAILED=1
+fi
+if grep -q "HDR GET /probe.*AL='zh-CN" "$TMPOUT" 2>/dev/null && \
+	grep -q "HDR GET /zportal/loginForWeb.*AL='zh-CN.*SF='cross-site'" "$TMPOUT" 2>/dev/null && \
+	grep -q "HDR POST /zportal/login/do.*AL='zh-CN.*SF='same-origin'" "$TMPOUT" 2>/dev/null; then
+	echo "    [OK]   探测/登录请求带浏览器请求头"
+else
+	echo "    [FAIL] 探测或登录请求缺少 Accept-Language/Sec-Fetch 头"; FAILED=1
 fi
 mkdir -p "$AUTOVERIFY_RUN_DIR/auth.lock.d"
 {

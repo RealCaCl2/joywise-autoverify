@@ -147,6 +147,29 @@ autoverify-apply
 # 如确需强制接管，再显式设置 redirect=1 并提交、应用。
 ```
 
+#### 启用时机：认证前还是认证后
+
+`autoverify.dns.mode` 决定何时接管 dnsmasq 上游（缺失时默认 `post_auth`）：
+
+| 值 | 行为 |
+| --- | --- |
+| `post_auth`（默认） | 认证前保留网络下发的明文 DNS；认证成功且连通性验证通过后再切 DoH。检测到掉线、需要重新认证时先恢复明文上游。 |
+| `always` | 服务启动/应用配置时立即接管 DoH（旧行为）。只在认证前也放行 443 的网络可用。 |
+
+多数校园网在认证前只放行 HTTP，HTTPS/443 被拦截。此时 DoH 无法建立连接，
+而 dnsmasq 被改成只查询 `127.0.0.1:5053` 后连门户探测都无法解析域名，
+会卡在 `E_PORTAL_NOT_FOUND`，形成“认证需要 DNS、DNS 需要先认证”的死锁。
+`post_auth` 就是为这个场景准备的：认证阶段用校园网自己的 DNS，认证完成后再加密。
+
+切换是事务式的：先检查 HTTPS 可达，再启动代理并确认 `5053` 监听，
+最后重启 dnsmasq 并用 `nslookup` 验证整条解析链路。任一步失败都会立即恢复
+明文上游并把失败标记写入 `/etc/autoverify-dns/fail`，10 分钟内不再重试，
+避免守护进程每个周期都重启 dnsmasq。
+
+`post_auth` 模式下，认证前 dnsmasq 不再强制 `noresolv`，而是使用 OpenWrt
+从 WAN 获取的解析器（`/tmp/resolv.conf.d/resolv.conf.auto`）。如果配置过
+`serversfile` 或分域转发，关闭 DoH 时会原样恢复。
+
 启用前会先检查本机 53 端口真的在监听，否则拒绝启用（重定向过去没人应答 = 客户端直接断解析）。
 代理启动后最多等待 5 秒确认 `127.0.0.1:5053` 的 UDP 监听，仅在 `dns.redirect=1`
 且 `dns.enabled=1` 时添加 DNS 重定向。`redirect` 缺失时默认 `0`，适用于保留旧配置的升级。
@@ -165,17 +188,21 @@ autoverify-apply
 ```
 
 路由器上游改为 `dnsmasq → 127.0.0.1:5053 → https-dns-proxy → DoH`。
-所有 dnsmasq UCI 实例均设置 `noresolv=1`，替换 `server`（含分域转发）并移除
-`serversfile`，不再读取 WAN 下发的明文 DNS，也不在 DoH 失败时回退明文上游。
+接管生效期间，所有 dnsmasq UCI 实例均设置 `noresolv=1`，替换 `server`（含分域转发）
+并移除 `serversfile`，不再读取 WAN 下发的明文 DNS，也不在 DoH 运行中回退明文上游。
+`post_auth` 模式在接管前、以及每次需要重新认证前会恢复这些原配置。
 
 套件依赖 `https-dns-proxy` 和 `ca-bundle`。LuCI 提供三个预设，UCI 配置项为
 `autoverify.dns.doh_provider`（旧配置缺失时默认 `tencent`）：
 
 | 预设 | DoH 端点 | Bootstrap DNS |
 | --- | --- | --- |
-| `tencent`（默认） | `https://doh.pub/dns-query` | `119.29.29.29` |
+| `tencent`（默认） | `https://doh.pub/dns-query` | `119.29.29.29,182.254.116.116` |
 | `aliyun` | `https://dns.alidns.com/dns-query` | `223.5.5.5,223.6.6.6` |
-| `custom` | `autoverify.dns.doh_url` | `autoverify.dns.doh_bootstrap`（逗号分隔的 IPv4） |
+| `custom` | `autoverify.dns.doh_url` | `autoverify.dns.doh_bootstrap`（逗号分隔的 IPv4，至少两个） |
+
+bootstrap 至少填两个地址：`https-dns-proxy` 2026.05.06 配 c-ares 1.34 时，
+只有一个 nameserver 会在 `dns_poller.c` 里直接 abort，代理根本起不来。
 
 预设固定使用对应域名端点与 bootstrap，自定义字段只在 `custom` 时生效。
 自定义 URL 必须使用 HTTPS，可含端口及查询参数；不支持 URL 用户名/密码和 IPv6 字面量。
@@ -209,9 +236,10 @@ dnsmasq 原上游保存在各实例的 `av_doh_*` UCI 选项；重复应用不�
 
 需要运行 DoH 代理，增加 HTTPS 请求开销。默认允许客户端使用自定义 DNS；只有启用
 强制接管才限制客户端的普通 DNS，并可能干扰 Clash 类客户端。dnsmasq 原分域上游
-在 DoH 启用期间会暂停。DoH 不可达、TLS 时间/证书
-错误或校园网认证前禁止 HTTPS 时，外部域名解析会失败；门户可使用 IP 地址配置，
-也可关闭路由器 DoH 恢复原上游后完成认证。启用前应验证网络可访问所选端点。
+在 DoH 接管期间会暂停。DoH 不可达、TLS 时间/证书错误时，外部域名解析会失败；
+`post_auth` 模式会在切换前检查 HTTPS 并做解析验证，失败自动回退明文上游。
+认证前禁止 HTTPS 的网络请保持 `dns.mode=post_auth`（默认），不要改成 `always`。
+启用前应验证网络可访问所选端点。
 
 ## DHCP 伪装
 
@@ -302,7 +330,7 @@ RA 还在的话，每次通告都会把 lifetime 刷新回满值；RA 停了则�
 |---|---|---|---|
 | TTL | IPv4 TTL | `/etc/nftables.d/20-ttl-normalize.nft` | `uci set autoverify.ttl.enabled` |
 | NTP | LAN `udp/123` | UCI `firewall.ntp_converge` | `uci set autoverify.ntp.enabled` |
-| DNS | dnsmasq DoH；可选 LAN `udp/tcp 53` 接管 | DoH 代理；可选 `firewall.dns_converge_{udp,tcp}` | `autoverify.dns.enabled` / `autoverify.dns.redirect` |
+| DNS | dnsmasq DoH；可选 LAN `udp/tcp 53` 接管 | DoH 代理；可选 `firewall.dns_converge_{udp,tcp}` | `autoverify.dns.enabled` / `autoverify.dns.redirect` / `autoverify.dns.mode` |
 | DHCP | hostname / client-id / vendor-class / DHCPv6 FQDN | `network.<iface>.*` + `network.<iface>6.noclientfqdn` | `uci set autoverify.dhcp.enabled` |
 | IPv6 | LAN 不发 RA / DHCPv6 | `dhcp.lan.ra` / `dhcp.lan.dhcpv6` | `uci set autoverify.ipv6.enabled` |
 

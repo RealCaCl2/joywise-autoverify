@@ -51,6 +51,15 @@ if [ ! -r "$AV_STATE_LIB" ]; then
 fi
 . "$AV_STATE_LIB"
 
+# DNS 上游的认证前后切换（dns.mode=post_auth）。
+AV_DNS_LIB="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
+# shellcheck disable=SC1090
+if [ ! -r "$AV_DNS_LIB" ]; then
+	printf 'autoverify: 找不到 %s\n' "$AV_DNS_LIB" >&2
+	exit 1
+fi
+. "$AV_DNS_LIB"
+
 # --------------------------------------------------------------- 读取配置 ---
 # 唯一事实来源是 UCI /etc/config/autoverify。
 # 无 uci 命令时(本地测试)自动退回同名环境变量, 再退回默认值。
@@ -60,12 +69,15 @@ PASSWORD=$(av_cfg main password)
 PORTAL_HOST=$(av_cfg portal host "")
 PORTAL_PORT=$(av_cfg portal port "9090")
 PORTAL_URL=$(av_cfg portal url)
-PROBE_URLS=$(av_cfg tuning probe_urls "http://connect.rom.miui.com/generate_204 http://connectivitycheck.platform.hicloud.com/generate_204 http://wifi.vivo.com.cn/generate_204")
+PROBE_URLS=$(av_cfg tuning probe_urls "http://www.gstatic.com/generate_204")
 EXPECT_CODE=$(av_cfg tuning expect_code "204")
 HTTP_TIMEOUT=$(av_cfg tuning http_timeout "8")
 CHECK_INTERVAL=$(av_cfg tuning check_interval "60")
 RETRY_INTERVAL=$(av_cfg tuning retry_interval "20")
 MAX_RETRY_INTERVAL=$(av_cfg tuning max_retry_interval "300")
+# 登录 POST 前的随机延迟上限（秒，0 = 关闭）。真实浏览器从打开登录页到提交
+# 至少需要数秒；抓完页面 0 秒提交是明显的脚本特征。
+LOGIN_DELAY=$(av_cfg tuning login_delay "2")
 VERBOSE=$(av_cfg_bool tuning verbose "0")
 LOCK_ENABLED=$(av_cfg_bool tuning lock_enabled "1")
 LOCK_MAX_AGE=$(av_cfg tuning lock_max_age "300")
@@ -90,6 +102,11 @@ AUTOVERIFY_SOURCE="${AUTOVERIFY_SOURCE:-manual}"
 # 应与 UA-Mask 的 UAmask.main.ua 一致: 探测流量与 NAT 后的客户端流量同源同 IP,
 # 两边 UA 不同就等于告诉对面这台机器上住着两种浏览器。
 USER_AGENT=$(av_cfg tuning user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+
+# 探测/登录都走明文 HTTP，请求头对校园网 DPI 和门户直接可见。
+# 只补浏览器稳定会发的头；不伪造 Sec-Ch-Ua（品牌列表随版本变化，写错反而更显眼）。
+ACCEPT_LANGUAGE='zh-CN,zh;q=0.9,en;q=0.8'
+ACCEPT_HTML='text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
 
 # portal.host 未设置时 base 留空 —— 门户地址靠响应里的 /zportal/ 自动识别。
 # base 只在"响应给的是相对路径"时用来补全, 见 abspath()。
@@ -133,6 +150,27 @@ interruptible_sleep() {
 	return 0
 }
 
+# 在固定间隔上加减随机抖动，避免精确的 60/20/40/80 秒节拍。
+# _max > 0 时把结果钳在上限内（退避上限）。
+jittered_sleep() {
+	_base=$1
+	_pct=${2:-15}
+	_max=${3:-0}
+	case "$_base" in ''|*[!0-9]*) interruptible_sleep "${_base:-0}"; return 0 ;; esac
+	[ "$_base" -gt 0 ] || { interruptible_sleep "$_base"; return 0; }
+	_rand=${RANDOM:-0}
+	case "$_rand" in ''|*[!0-9]*) _rand=0 ;; esac
+	_delta=$(( _base * _pct / 100 ))
+	[ "$_delta" -lt 1 ] && _delta=1
+	_t=$(( _base + (_rand % (_delta * 2 + 1)) - _delta ))
+	[ "$_t" -lt 1 ] && _t=1
+	case "$_max" in
+		''|*[!0-9]*) ;;
+		*) [ "$_max" -gt 0 ] && [ "$_t" -gt "$_max" ] && _t="$_max" ;;
+	esac
+	interruptible_sleep "$_t"
+}
+
 need_curl() {
 	command -v curl >/dev/null 2>&1 && return 0
 	die "未找到 curl, 请先安装: opkg update && opkg install curl"
@@ -143,10 +181,31 @@ need_curl() {
 # 必须存响应头: 实测这台 NAS 不是用 302, 而是回 200, 门户地址既可能在
 # 页面里的 JS 跳转中, 也可能在 200 响应的 Location 头中。
 probe() {
-	curl -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" \
+	curl -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" --compressed \
+		-H 'Accept: */*' \
+		-H "Accept-Language: $ACCEPT_LANGUAGE" \
+		-H 'Connection: keep-alive' \
 		-D "$TMP/headers" -o "$TMP/body" \
 		-w '%{http_code} %{redirect_url}' \
 		"$1" 2>/dev/null
+}
+
+# 每次探测前随机化地址顺序：固定从第一个地址开始，长期看也是一个稳定节拍。
+# 单地址时直接返回，避免多起 awk 进程。
+shuffled_probe_urls() {
+	set -- $PROBE_URLS
+	[ "$#" -eq 0 ] && return 0
+	[ "$#" -eq 1 ] && { printf '%s\n' "$1"; return 0; }
+	printf '%s\n' "$@" | awk -v seed="${RANDOM:-0}" '
+		BEGIN { srand(seed) }
+		{ a[NR] = $0 }
+		END {
+			for (i = NR; i > 1; i--) {
+				j = int(rand() * i) + 1
+				t = a[i]; a[i] = a[j]; a[j] = t
+			}
+			for (i = 1; i <= NR; i++) print a[i]
+		}'
 }
 
 split_probe_result() {
@@ -161,7 +220,7 @@ split_probe_result() {
 
 # 离线: 未认证; 返回 0 表示在线
 check_online() {
-	for _u in $PROBE_URLS; do
+	for _u in $(shuffled_probe_urls); do
 		split_probe_result "$(probe "$_u")"
 		logv "探测 $_u -> ${PROBE_CODE:-无响应}${PROBE_LOC:+ (重定向到 $PROBE_LOC)}"
 		[ -n "$PROBE_LOC" ] && continue
@@ -249,7 +308,7 @@ extract_portal_url() {
 
 # 从探测结果中找出门户登录页地址
 find_portal_url() {
-	for _u in $PROBE_URLS; do
+	for _u in $(shuffled_probe_urls); do
 		split_probe_result "$(probe "$_u")"
 		logv "门户探测摘要: $_u HTTP ${PROBE_CODE:-?} redirect=[${PROBE_LOC:-}]"
 
@@ -276,7 +335,10 @@ find_portal_url() {
 		# d) 多跳重定向: 跟随后取最终地址
 		if [ -n "$PROBE_LOC" ]; then
 			logv "跟随中间跳转: $PROBE_LOC"
-			_p=$(curl -s -L --max-redirs 5 -m "$HTTP_TIMEOUT" -A "$USER_AGENT" \
+			_p=$(curl -s -L --max-redirs 5 -m "$HTTP_TIMEOUT" -A "$USER_AGENT" --compressed \
+				-H "Accept: $ACCEPT_HTML" \
+				-H "Accept-Language: $ACCEPT_LANGUAGE" \
+				-H 'Connection: keep-alive' \
 				-D "$TMP/headers" -o "$TMP/body" -w '%{url_effective}' "$_u" 2>/dev/null)
 			_follow_rc=$?
 			[ "$_follow_rc" -eq 0 ] || logv "跟随探测重定向失败: curl 退出码 $_follow_rc"
@@ -419,7 +481,14 @@ do_login() {
 	# 不跟随则只能拿到空 body, 表现为 "无法获取认证页面"。
 	_cj="$TMP/cookies"
 	rm -f "$TMP/page" "$TMP/tags" "$TMP/page_headers"
-	_page_url=$(curl -s -L --max-redirs 5 -m "$HTTP_TIMEOUT" -A "$USER_AGENT" \
+	_page_url=$(curl -s -L --max-redirs 5 -m "$HTTP_TIMEOUT" -A "$USER_AGENT" --compressed \
+		-H "Accept: $ACCEPT_HTML" \
+		-H "Accept-Language: $ACCEPT_LANGUAGE" \
+		-H 'Upgrade-Insecure-Requests: 1' \
+		-H 'Sec-Fetch-Site: cross-site' \
+		-H 'Sec-Fetch-Mode: navigate' \
+		-H 'Sec-Fetch-Dest: document' \
+		-H 'Connection: keep-alive' \
 		-c "$_cj" -b "$_cj" -D "$TMP/page_headers" \
 		-o "$TMP/page" -w '%{url_effective}' "$_purl" 2>/dev/null)
 	_page_curl_rc=$?
@@ -460,15 +529,32 @@ do_login() {
 	# Referer 用跟随跳转后的最终地址(与浏览器一致)
 	_ref="${_page_url:-$_purl}"
 
+	# 真实浏览器从页面加载到提交至少需要数秒。抓完页面立即 POST 是脚本特征。
+	# login_delay 是上限（秒，0 = 关闭），实际在 1..上限 之间随机。
+	case "$LOGIN_DELAY" in ''|*[!0-9]*) LOGIN_DELAY=2 ;; esac
+	if [ "$LOGIN_DELAY" -gt 0 ]; then
+		_rand=${RANDOM:-0}
+		case "$_rand" in ''|*[!0-9]*) _rand=0 ;; esac
+		_ld_s=$(( (_rand % LOGIN_DELAY) + 1 ))
+		logv "登录前随机延迟 ${_ld_s}s"
+		sleep "$_ld_s"
+	fi
+
 	# 字段名、取值和顺序严格对齐浏览器 #login_form.serialize() 的结果。
 	# 注意 qrCodeId / validCode 提交的是页面里的占位文字, 这是浏览器实际行为。
-	set -- -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" \
+	set -- -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" --compressed \
 		-o "$TMP/resp" -w '%{http_code}' \
 		-b "$_cj" -c "$_cj" \
 		-H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \
+		-H "Accept: */*" \
+		-H "Accept-Language: $ACCEPT_LANGUAGE" \
 		-H "Origin: $_origin" \
 		-H "Referer: $_ref" \
 		-H 'X-Requested-With: XMLHttpRequest' \
+		-H 'Sec-Fetch-Site: same-origin' \
+		-H 'Sec-Fetch-Mode: cors' \
+		-H 'Sec-Fetch-Dest: empty' \
+		-H 'Connection: keep-alive' \
 		--data-urlencode "qrCodeId=$(field qrCodeId "$TMP/tags")" \
 		--data-urlencode "username=$USERNAME" \
 		--data-urlencode "pwd=$PASSWORD" \
@@ -555,6 +641,9 @@ run_auth_locked() {
 
 	AUTH_ACTIVE=1
 	av_state_begin "$AUTOVERIFY_SOURCE" "$_operation" checking
+	# post_auth 模式: 认证需要域名解析, 而 DoH 在认证前通常不可达,
+	# 先把上游恢复成网络下发的明文 DNS（always 模式下这里是空操作）。
+	dns_doh_before_auth
 	do_login
 	_auth_rc=$?
 	if [ "$_auth_rc" != "0" ]; then
@@ -572,6 +661,7 @@ run_auth_locked() {
 	AUTH_ACTIVE=0
 	if [ "$_operation" = "login" ]; then
 		av_state_finish online success "" "" "$AUTH_HTTP_CODE" "$AUTH_ORIGIN"
+		dns_doh_after_auth || log "DoH 切换未完成, 保持明文上游"
 	fi
 	auth_lock_release
 	return 0
@@ -636,7 +726,15 @@ follow_next_page() {
 	esac
 	_log_url=$(printf '%s' "$_url" | sed 's/[?#].*//')
 	logv "跟随 nextPage: $_log_url"
-	_code=$(curl -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" -b "$_cj" -c "$_cj" \
+	_code=$(curl -s -m "$HTTP_TIMEOUT" -A "$USER_AGENT" --compressed \
+		-H "Accept: $ACCEPT_HTML" \
+		-H "Accept-Language: $ACCEPT_LANGUAGE" \
+		-H 'Upgrade-Insecure-Requests: 1' \
+		-H 'Sec-Fetch-Site: same-origin' \
+		-H 'Sec-Fetch-Mode: navigate' \
+		-H 'Sec-Fetch-Dest: document' \
+		-H 'Connection: keep-alive' \
+		-b "$_cj" -c "$_cj" \
 		-o /dev/null -w '%{http_code}' "$_url" 2>/dev/null)
 	_curl_rc=$?
 	AUTH_HTTP_CODE="$_code"
@@ -651,6 +749,8 @@ follow_next_page() {
 
 run_once() {
 	if check_online; then
+		# 已在线也补一次切换: 开机时会话可能仍然有效, 或刚从 always 模式升级过来。
+		dns_doh_after_auth
 		logv "在线, 无需认证"
 		return 0
 	fi
@@ -662,6 +762,7 @@ run_once() {
 		sleep 2
 		_verify_rc=0
 		if check_online; then
+			dns_doh_after_auth
 			av_state_finish online success "" "" "$AUTH_HTTP_CODE" "$AUTH_ORIGIN"
 			log "认证后连通性验证通过"
 		else
@@ -678,13 +779,15 @@ run_once() {
 }
 
 run_daemon() {
-	log "守护进程启动 (在线检查间隔 ${CHECK_INTERVAL}s, 失败重试 ${RETRY_INTERVAL}~${MAX_RETRY_INTERVAL}s)"
+	log "守护进程启动 (在线检查间隔 ${CHECK_INTERVAL}s±15%, 失败重试 ${RETRY_INTERVAL}~${MAX_RETRY_INTERVAL}s)"
 	_delay="$RETRY_INTERVAL"
 	while :; do
 		if check_online; then
+			# 幂等: 已接管时直接返回。开机/重载后会在这里补切。
+			dns_doh_after_auth
 			logv "在线"
 			_delay="$RETRY_INTERVAL"
-			interruptible_sleep "$CHECK_INTERVAL"
+			jittered_sleep "$CHECK_INTERVAL" 15
 			continue
 		fi
 
@@ -695,12 +798,13 @@ run_daemon() {
 			av_state_phase verifying
 			sleep 2
 			if check_online; then
+				dns_doh_after_auth
 				av_state_finish online success "" "" "$AUTH_HTTP_CODE" "$AUTH_ORIGIN"
 				log "认证后连通性验证通过"
 				_delay="$RETRY_INTERVAL"
 				AUTH_ACTIVE=0
 				auth_lock_release
-				interruptible_sleep "$CHECK_INTERVAL"
+				jittered_sleep "$CHECK_INTERVAL" 15
 				continue
 			fi
 			av_state_finish failed failed E_VERIFY_OFFLINE verify "$AUTH_HTTP_CODE" "$AUTH_ORIGIN"
@@ -711,7 +815,7 @@ run_daemon() {
 			_auth_rc=$?
 			if [ "$_auth_rc" = "3" ]; then
 				logv "认证任务忙, 本轮跳过"
-				interruptible_sleep "$RETRY_INTERVAL"
+				jittered_sleep "$RETRY_INTERVAL" 20
 				continue
 			fi
 		fi
@@ -719,7 +823,7 @@ run_daemon() {
 		_delay=$((_delay * 2))
 		[ "$_delay" -gt "$MAX_RETRY_INTERVAL" ] && _delay="$MAX_RETRY_INTERVAL"
 		logv "${_delay}s 后重试"
-		interruptible_sleep "$_delay"
+		jittered_sleep "$_delay" 20 "$MAX_RETRY_INTERVAL"
 	done
 }
 
@@ -730,8 +834,19 @@ run_debug() {
 	echo "  账号            : ${USERNAME:-<未设置>}"
 	echo "  探测地址        : $PROBE_URLS"
 	echo "  期望状态码      : $EXPECT_CODE"
+	echo "  登录提交延迟    : ${LOGIN_DELAY}s (1..上限随机, 0=关闭)"
 	echo "  门户            : ${PORTAL_BASE:-<未设置, 按地址中的 /zportal/ 自动识别>}"
 	echo "  登录页覆盖      : ${PORTAL_URL:-<未设置, 自动探测>}"
+	_doh_mode=$(dns_doh_mode)
+	if dns_doh_active; then
+		_doh_state="已接管 dnsmasq 上游"
+	elif [ "$_doh_mode" = "post_auth" ]; then
+		_doh_state="未接管 (认证成功后再切)"
+	else
+		_doh_state="未接管"
+	fi
+	echo "  DoH 时机        : $_doh_mode"
+	echo "  DoH 状态        : $_doh_state"
 	echo "  WAN 接口        : ${_wif:-<无默认路由>}"
 	echo "  该接口 IP       : $(if_ip4 "$_wif")"
 	echo "  该接口 MAC      : $(mac_cisco "$(if_mac "$_wif")")"
@@ -809,6 +924,7 @@ run_validate() {
 	validate_uint "tuning.check_interval" "$CHECK_INTERVAL"
 	validate_uint "tuning.retry_interval" "$RETRY_INTERVAL"
 	validate_uint "tuning.max_retry_interval" "$MAX_RETRY_INTERVAL"
+	validate_range "tuning.login_delay" "$LOGIN_DELAY" 0 10
 	if [ "$RETRY_INTERVAL" -gt 0 ] 2>/dev/null && \
 		[ "$MAX_RETRY_INTERVAL" -gt 0 ] 2>/dev/null && \
 		[ "$RETRY_INTERVAL" -gt "$MAX_RETRY_INTERVAL" ]; then
@@ -835,12 +951,20 @@ run_validate() {
 	validate_bool "ntp.enabled" "$(av_cfg ntp enabled "1")"
 	validate_bool "dns.enabled" "$(av_cfg dns enabled "1")"
 	validate_bool "dns.redirect" "$(av_cfg dns redirect "0")"
+	case "$(av_cfg dns mode post_auth)" in
+		always|post_auth) ;;
+		*) validate_error "dns.mode 只能是 always 或 post_auth" ;;
+	esac
 	if [ "$(av_cfg_bool dns enabled 0)" = 1 ]; then
 		_dns_lib="${AV_DNS_LIB:-${AV_LIB%/*}/dns.sh}"
 		if [ -r "$_dns_lib" ]; then
 			# shellcheck disable=SC1090
 			. "$_dns_lib"
 			dns_doh_url || validate_error 'DoH 预设、自定义 HTTPS URL 或 bootstrap IPv4 列表无效'
+			# https-dns-proxy 2026.05 与 c-ares 1.34 只给一个 bootstrap 会直接崩溃。
+			_n_boot=$(printf '%s\n' "${_doh_bootstrap:-}" | awk -F, 'NF{n=NF} END{print n+0}')
+			[ "$_n_boot" -ge 2 ] || validate_warn \
+				"dns.doh_bootstrap 只有 $_n_boot 个地址; https-dns-proxy 需要至少两个, 否则会崩溃"
 		else
 			validate_error '缺少 DNS DoH 配置库'
 		fi

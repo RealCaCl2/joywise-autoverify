@@ -13,13 +13,18 @@ config autoverify 'portal'
 	option url ''
 
 config autoverify 'tuning'
-	option probe_urls 'http://connect.rom.miui.com/generate_204 http://connectivitycheck.platform.hicloud.com/generate_204 http://wifi.vivo.com.cn/generate_204'
+	# 探测地址应与你伪装的人设一致。Windows/Chrome 用 Chrome 自己的 generate_204；
+	# 旧的 MIUI/华为/vivo 组合像一台多厂商手机，和 Windows UA 对不上。
+	option probe_urls 'http://www.gstatic.com/generate_204'
 	option expect_code '204'
 	option http_timeout '8'
 	option check_interval '60'
 	option retry_interval '20'
 	option max_retry_interval '300'
 	option verbose '0'
+	# 登录 POST 前的随机延迟上限（秒，0 = 关闭）。实际在 1..该值之间随机；
+	# 真实浏览器从打开登录页到提交至少需要数秒，抓完页面立即提交是脚本特征。
+	option login_delay '2'
 	# 认证入口互斥锁。旧配置缺失时脚本也会按这些默认值工作。
 	option lock_enabled '1'
 	option lock_max_age '300'
@@ -44,13 +49,19 @@ config hardening 'ntp'
 
 config hardening 'dns'
 	option enabled '1'
+	# 认证前如何处理 dnsmasq 上游。
+	#   post_auth - 认证前保留网络下发的明文 DNS，认证并验证在线后再切 DoH。
+	#               多数校园网认证前只放行 HTTP，DoH 走 443 会连不上。
+	#   always    - 服务启动即接管 DoH（旧行为；仅在认证前也放行 443 的网络可用）。
+	option mode 'post_auth'
 	# DoH 与 LAN DNS 接管分开。默认允许客户端使用自己的 DNS（兼容 Clash）。
 	option redirect '0'
 	# 预设: tencent / aliyun / custom。普通查询只走 DoH。
 	option doh_provider 'tencent'
 	# 以下仅用于 custom；bootstrap 只解析 DoH 服务域名。
+	# 至少写两个地址：https-dns-proxy + c-ares 在只有一个 bootstrap 时会崩溃。
 	option doh_url ''
-	option doh_bootstrap '119.29.29.29'
+	option doh_bootstrap '119.29.29.29,182.254.116.116'
 
 config hardening 'dhcp'
 	option enabled '1'

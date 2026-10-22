@@ -161,3 +161,69 @@ r14 装上后由使用者在浏览器里发现：**状态面板与操作区的�
   不进 syslog；只有 daemon 的日志会被 procd 转发到 syslog。
 - **回滚路径**：本次只用过文件级“还原 HEAD 版本”来回退中间状态，没有用 `apk` 真正
   降级过一次版本。
+
+### 跟进：r18（DoH 改为认证成功后启用）
+
+实机定位到 `E_PORTAL_NOT_FOUND` 的完整因果链：认证前 443 被拦截 → DoH 无法建立 →
+dnsmasq 仍被强制指向 `127.0.0.1#5053` → 所有探测 HTTP 000。另发现
+`https-dns-proxy 2026.05.06-r1 + c-ares 1.34.8` 在只有一个 bootstrap 时于
+`dns_poller.c` 直接 abort，tencent 预设恰好只写了一个地址。
+
+本地回归：
+
+- `python test/test_dns.py`：20 项通过，新增 post_auth 切换、HTTPS 未放行跳过、
+  解析失败回退、冷却期、always 兼容、备份丢失恢复、post_auth 应用时保留明文上游。
+- `PYTHON=python sh test/run.sh`：完整认证回归全部通过。
+- `sh -n` 四个脚本、`node --check` LuCI 视图通过。
+
+实机（OpenWrt 25.12.5 / ramips-mt7621）：
+
+- 部署新脚本并 `uci set autoverify.dns.mode=post_auth` 后执行 `autoverify-apply`：
+  dnsmasq 从 `noresolv + 127.0.0.1#5053` 恢复为 WAN 下发的 `10.82.66.1`，
+  `nslookup` 正常。
+- `autoverify reload`：04:06:27 认证成功，04:06:47 日志“已切换到 DoH 上游”，
+  5053 监听存在，`nslookup www.baidu.com 127.0.0.1` 正常，状态 `online/success`。
+- 手工执行 `dns_doh_before_auth` → 明文上游、DNS 正常；再 `dns_doh_after_auth` →
+  重新接管、DNS 正常，证明掉线重认证路径可逆。
+- 再次 reload（模拟开机）：先在 apply 阶段恢复明文，守护进程检测到已在线后
+  自动补切 DoH，DNS 全程可用。
+
+未验证：
+
+- ⚠️ APK r18 的 SDK 构建与 `apk` 升级流程；本次是直接覆盖脚本验证。
+- ⚠️ LuCI 页面在浏览器里的实际渲染（仅做了 `node --check`）。
+- ⚠️ 真实“会话被校园网踢下线”后的完整守护进程循环；已验证同一组函数的切换/回退。
+
+### 跟进：r18（探测/登录 L7 伪装与节拍）
+
+- 探测默认地址改为 Chrome 的 `http://www.gstatic.com/generate_204`，与 Windows/Chrome 人设一致。
+- `probe()`、登录页 GET、登录 POST、nextPage 补 `Accept` / `Accept-Language` /
+  `Sec-Fetch-*` / `Connection`；统一加 `--compressed`（路由器 curl 只支持 gzip/deflate）。
+- 新增 `tuning.login_delay`（默认 2，0 关闭），实际在 1..上限之间随机。
+- 在线检查 ±15%、失败退避 ±20% 抖动；探测地址用 Fisher-Yates 随机顺序
+  （`awk` 实现，seed 取 `$RANDOM`）。
+
+本地验证：
+
+- `sh -n`、`node --check`、`py_compile` 通过。
+- `test/run.sh` 全部通过；新增断言验证 mock 门户收到的头：
+  - 探测 GET：`Accept-Language: zh-CN,...`；
+  - 登录 GET：`Sec-Fetch-Site: cross-site`；
+  - 登录 POST：`Sec-Fetch-Site: same-origin`；
+  - nextPage：`Sec-Fetch-Site: same-origin`。
+- 单独用 `TUNING_LOGIN_DELAY=2` 跑一次 mock 认证：日志出现
+  “登录前随机延迟 1s”，认证成功。
+- 抖动/乱序单独验证：60s 得到 52–68s，300s 上限得到 247–300s，乱序每次不同。
+
+实机（OpenWrt 25.12.5 / ramips-mt7621）：
+
+- `http://www.gstatic.com/generate_204` 经路由器返回 204；
+  `autoverify -v check` 输出 `探测 ... -> 204`。
+- `uci set autoverify.tuning.login_delay=2` 后 reload：守护进程日志变为
+  “在线检查间隔 60s±15%”，并自动重新接管 DoH，状态 `online/success`。
+- 新探测地址下 PC 正常上网，DoH 5053 监听、`nslookup` 正常。
+
+未验证：
+
+- ⚠️ 真实校园门户上的登录请求头/延迟（路由器当前在线，没有主动登出）。
+- ⚠️ 实机抓包确认请求头顺序；目前只验证了头存在。
