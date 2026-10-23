@@ -63,8 +63,9 @@
 
 ## 五、观测与可靠性
 
-- [ ] **16. 修 `daemon_count` / `daemon_pid`**（P1）
-  - `pidof autoverify` 会把 status 进程自身算进去；改 `pgrep -f 'autoverify daemon'` 或读 procd。
+- [x] **16. 修 `daemon_count` / `daemon_pid`**（P1）
+  - 已完成 r19：按 `/proc/<pid>/cmdline` 只统计第二个参数为 `daemon` 的进程，
+    `autoverify status` 自身不再计入。
 - [ ] **17. `status --json` / `audit` 补字段**（P1）
   - `dns_mode`、`doh_active`、`offload`、TTL 规则计数、`dhcp.reqopts` 实际值。
 - [ ] **18. UAmask 与 autoverify 的 UA 一致性检查**（P1）
@@ -76,12 +77,28 @@
 
 ## 六、发布与验证
 
-- [ ] **21. 构建 r18 APK**（P1）
-  - 当前路由器是直接覆盖脚本，包元数据仍为 r17。
+- [x] **21. 构建 r19 APK**（P1）
+  - 已用 WSL OpenWrt 25.12.5 ramips/mt7621 SDK 构建并升级路由器；
+    `dist/autoverify-1.0.0-r19.apk`，原有配置保留。
 - [ ] **22. LuCI 页面浏览器验收**（P2）
   - 新增的“启用时机”和“登录提交延迟”需要真实浏览器确认渲染/保存。
 - [ ] **23. 抓包验证**（P2）
   - 探测请求头、登录 GET/POST 头、DHCP option 55/57、offload 下 TTL 实际覆盖。
+
+## 七、DNS 认证前恢复（r19 后续）
+
+- [ ] **24. 认证前确认 https-dns-proxy 不再运行/启用**（P2）
+  - `dns_doh_before_auth` 在 dnsmasq 已是明文时直接返回；如果
+    https-dns-proxy 之后才启动并再次抢 dnsmasq，仍可能断 DNS。可在 pause
+    中按监听 / rc.d 状态无条件 stop + disable。
+- [ ] **25. pause 时处理 `serversfile`**（P3）
+  - 当前只清 `server=` 和 `noresolv`；若原配置用 `serversfile` 指向本机 DoH，
+    认证前仍可能拿到坏上游。需要解析文件或临时移除。
+- [ ] **26. 卸载时恢复 DNS**（P2）
+  - 增加 prerm：卸载 autoverify 时若处于暂停 / 接管状态，调用
+    `dns_doh_restore`，恢复用户原始 https-dns-proxy 配置。
+- [ ] **27. 日志级别分级**（P3）
+  - 正常状态切换目前也写 `daemon.err`；可拆成 notice / err，减少 syslog 噪声。
 
 ## 不建议做
 

@@ -138,6 +138,32 @@ av_state_finish() {
 	AV_STATE_ACTIVE=0
 }
 
+# 在线检查通过时刷新运行期状态。
+#
+# 只写 /var/run（tmpfs），不写 /var/lib 的持久化摘要：在线检查每 60 秒一次，
+# 每次都写闪存会造成不必要的写放大。只有状态从非 success 变为 online 时才写，
+# 因此不会每轮都产生 IO。
+av_state_online() {
+	[ "${AV_STATE_ENABLED:-1}" = "1" ] || return 0
+	[ -n "${AV_STATE_FILE:-}" ] || av_state_init
+	[ "$(av_state_get "$AV_STATE_FILE" result)" = success ] && return 0
+	_now=$(av_state_now)
+	AV_STATE_STAGE=online
+	AV_STATE_SOURCE=${1:-daemon}
+	AV_STATE_OPERATION=${2:-daemon}
+	AV_STATE_STARTED_AT=$_now
+	AV_STATE_FINISHED_AT=$_now
+	AV_STATE_DURATION_MS=0
+	AV_STATE_RESULT=success
+	AV_STATE_ERROR_CODE=""
+	AV_STATE_ERROR_STAGE=""
+	AV_STATE_HTTP_CODE=${3:-}
+	AV_STATE_ORIGIN=""
+	AV_STATE_NEXT_RETRY_AT=0
+	AV_STATE_LOCK_PID=""
+	av_state_write_file "$AV_STATE_FILE"
+}
+
 av_state_set_retry() {
 	[ "${AV_STATE_ENABLED:-1}" = "1" ] || return 0
 	AV_STATE_NEXT_RETRY_AT=${1:-0}

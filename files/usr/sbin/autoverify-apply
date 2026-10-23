@@ -134,7 +134,9 @@ apply_dns() {
 		if [ "$(dns_doh_mode)" = "post_auth" ]; then
 			# 认证前必须保留网络下发的明文上游: 门户普遍只放行 HTTP,
 			# DoH 走 443 会连不上, 提前接管会让认证本身无法完成。
-			dns_doh_restore || return 1
+			# 注意不能用 dns_doh_restore: 它会把用户原本的 https-dns-proxy
+			# 配置（可能自己就在抢 dnsmasq）一起恢复/启动。
+			dns_doh_before_auth || return 1
 		else
 			dns_doh_apply || return 1
 		fi
