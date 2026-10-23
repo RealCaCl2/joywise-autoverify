@@ -227,3 +227,32 @@ dnsmasq 仍被强制指向 `127.0.0.1#5053` → 所有探测 HTTP 000。另发�
 
 - ⚠️ 真实校园门户上的登录请求头/延迟（路由器当前在线，没有主动登出）。
 - ⚠️ 实机抓包确认请求头顺序；目前只验证了头存在。
+
+## 2026-10-23：r19 修复 post_auth 认证前误启动原 DoH 配置
+
+- 现场 `E_PORTAL_NOT_FOUND / portal`：dnsmasq 被 `https-dns-proxy` 的原始配置
+  （Cloudflare + Google，`force_dns=1`、`dnsmasq_config_update='*'`）接管；
+  `post_auth` 认证前调用 `dns_doh_restore`，把这份原始配置连同代理一起恢复/启动，
+  dnsmasq 又回到 `127.0.0.1#5053/5054`，探测拿不到域名解析，HTTP 000。
+- 修复：`dns.sh` 拆出 `dns_doh_save_original` / `dns_doh_pause` / 完整
+  `dns_doh_restore`。认证前暂停只停代理、保留原始快照、把 dnsmasq 拉回明文；
+  DoH apply 失败的回退也改用 pause，不再 full restore 启动原代理。
+  `autoverify-apply` 的 `post_auth` 启动路径改用 `dns_doh_before_auth`。
+- 附带：在线轮询通过 `av_state_online` 刷新运行期状态（只写 `/var/run`，不写闪存）；
+  `status` 的 daemon PID/数量只统计 `autoverify daemon`，不再把 status 命令算进去。
+- 本地：`python3 test/test_dns.py` 22 项通过，新增“原始配置本身抢占 dnsmasq”
+  与“认证前暂停/再次接管/完整恢复”回归；`dash -n` 全部脚本通过；
+  `sh test/run.sh` 在 WSL ext4、清除 `http_proxy/https_proxy` 后全部通过
+  （未清代理时仅并发互斥用例因时序失败）。
+- 构建：WSL OpenWrt 25.12.5 ramips/mt7621 SDK，`dist/autoverify-1.0.0-r19.apk`
+  （48,977 字节，noarch），SHA256
+  `ad76bebe505fcc438065a537c7a583cdbf87c0d8f21aef0d715725f43e7d1ec8`。
+- 实机：r17 → r19，`/etc/config/autoverify` 保留（新默认配置在
+  `autoverify.apk-new`）；DoH 上游为 `https://doh.pub/dns-query`，dnsmasq
+  `no-resolv` + `127.0.0.1#5053`，`/etc/autoverify-dns/active` 存在；
+  `gstatic` 204，`autoverify check` 返回 0，`status` 为 `online`，daemon 数量 1。
+- 备份：`/root/autoverify-r17-backup-20261023-151200`（r17 脚本/配置）、
+  `/root/autoverify-dnsfix-20261023-143239`（DNS 修复前配置）、
+  `/tmp/autoverify-1.0.0-r17.apk`（回滚包）。
+- 未验证：真实校园网会话过期后的完整认证循环；后续优化见
+  `docs/hardening-backlog.md` 第七节。

@@ -20,9 +20,15 @@ dns_doh_mode() {
 	esac
 }
 
-# DoH 接管是否处于生效状态（proxy.uci 只在接管期间存在）。
+# DoH 是否处于“已应用”状态。
+#
+# active 只是标记；最终以 dnsmasq 是否真的还指向本机 5053 为准。这样即使
+# active 残留、而上游已经被手工改回明文，也不会误判为“DoH 已生效”而跳过
+# 重新接管。
 dns_doh_active() {
-	[ -f "$DNS_DOH_STATE/proxy.uci" ]
+	[ -f "$DNS_DOH_STATE/active" ] || return 1
+	dns_doh_plain_ready && return 1
+	return 0
 }
 
 dns_restart_dnsmasq() {
@@ -67,6 +73,32 @@ dnsmasq_sections() {
 	uci -q show dhcp | sed -n 's/^\(dhcp\.[^.]*\)=dnsmasq$/\1/p'
 }
 
+# dnsmasq 当前是否已经是“认证前明文”形态：
+#   - 没有 noresolv=1（否则不会读网络下发的 resolv 文件）
+#   - 没有指向本机 DoH 代理的 server=127.0.0.1#5053/5054
+# 只判断“有没有可用的明文上游”，不要求具体是哪个服务器。
+dns_doh_plain_ready() {
+	_found=0
+	for _dm in $(dnsmasq_sections); do
+		_found=1
+		[ "$(uci -q get "$_dm.noresolv")" = 1 ] && return 1
+		_servers=$(uci -q get "$_dm.server") || _servers=""
+		for _srv in $_servers; do
+			case "$_srv" in
+				127.0.0.1#5053|127.0.0.1#5054|::1#5053|::1#5054) return 1 ;;
+			esac
+		done
+	done
+	[ "$_found" = 1 ]
+}
+
+dns_doh_have_markers() {
+	for _dm in $(dnsmasq_sections); do
+		[ "$(uci -q get "$_dm.av_doh_saved")" = 1 ] && return 0
+	done
+	return 1
+}
+
 dns_doh_url() {
 	_doh_provider=$(av_cfg dns doh_provider tencent)
 	case "$_doh_provider" in
@@ -109,22 +141,50 @@ dns_doh_url() {
 		} END {exit !ok}'
 }
 
-dns_doh_restore() {
-	_have_proxy=0
-	[ -f "$DNS_DOH_STATE/proxy.uci" ] && _have_proxy=1
-	_saved=0
-	for _dm in $(dnsmasq_sections); do
-		[ "$(uci -q get "$_dm.av_doh_saved")" = 1 ] && _saved=1
+# 保存 autoverify 接管前的原始状态。
+#
+# proxy.uci / enabled / running 是“完整恢复”用的，只能在第一次接管时保存；
+# 认证前暂停 DoH 时必须把它们留着，否则下一次只能把 autoverify 自己的 DoH
+# 配置当成“原始配置”，完整恢复就回不到用户原来的状态了。
+dns_doh_save_original() {
+	[ -f "$DNS_DOH_STATE/proxy.uci" ] && return 0
+	_dm_sections=$(dnsmasq_sections)
+	[ -n "$_dm_sections" ] || { log '找不到 dnsmasq UCI 配置'; return 1; }
+	(umask 077; mkdir -p "$DNS_DOH_STATE") || return 1
+	"$DNS_DOH_INIT" enabled && touch "$DNS_DOH_STATE/enabled"
+	"$DNS_DOH_INIT" status >/dev/null 2>&1 && touch "$DNS_DOH_STATE/running"
+	# 先停原服务，让它把手里的 dnsmasq 配置还回来，再快照。
+	"$DNS_DOH_INIT" stop || return 1
+	(umask 077; uci export https-dns-proxy > "$DNS_DOH_STATE/proxy.uci.tmp") || return 1
+	mv "$DNS_DOH_STATE/proxy.uci.tmp" "$DNS_DOH_STATE/proxy.uci" || return 1
+	for _dm in $_dm_sections; do
+		if [ "$(uci -q get "$_dm.av_doh_saved")" != 1 ]; then
+			for _opt in noresolv server serversfile; do
+				if _old=$(uci -q get "$_dm.$_opt"); then
+					uci set "$_dm.av_doh_${_opt}_present=1" || return 1
+					if [ "$_opt" = server ]; then
+						for _srv in $_old; do uci add_list "$_dm.av_doh_server=$_srv" || return 1; done
+					else
+						uci set "$_dm.av_doh_$_opt=$_old" || return 1
+					fi
+				fi
+			done
+			uci set "$_dm.av_doh_saved=1" || return 1
+		fi
 	done
-	# 没有备份也没有接管标记时什么都不做。
-	# 但只剩 dnsmasq 标记（proxy.uci 被手工删掉）也要恢复，否则上游永远停在
-	# 127.0.0.1#5053，而代理根本没在跑。
-	[ "$_have_proxy" = 1 ] || [ "$_saved" = 1 ] || return 0
-	if [ -x "$DNS_DOH_INIT" ]; then
-		"$DNS_DOH_INIT" stop || return 1
-	fi
+	uci commit dhcp || return 1
+	return 0
+}
+
+# 把 dnsmasq 的上游恢复成接管前保存的状态。
+#   keep: 保留 av_doh_* 标记（认证前暂停用，之后还要再次接管）
+#   drop: 删除标记（完整恢复/关闭 DoH 时用）
+dns_doh_restore_dnsmasq() {
+	_drop=${1:-drop}
+	_any=0
 	for _dm in $(dnsmasq_sections); do
 		[ "$(uci -q get "$_dm.av_doh_saved")" = 1 ] || continue
+		_any=1
 		for _opt in noresolv server serversfile; do
 			uci -q delete "$_dm.$_opt"
 			if [ "$(uci -q get "$_dm.av_doh_${_opt}_present")" = 1 ]; then
@@ -135,12 +195,33 @@ dns_doh_restore() {
 					uci set "$_dm.$_opt=$_old" || return 1
 				fi
 			fi
-			uci -q delete "$_dm.av_doh_$_opt"
-			uci -q delete "$_dm.av_doh_${_opt}_present"
+			if [ "$_drop" = drop ]; then
+				uci -q delete "$_dm.av_doh_$_opt"
+				uci -q delete "$_dm.av_doh_${_opt}_present"
+			fi
 		done
-		uci -q delete "$_dm.av_doh_saved"
+		if [ "$_drop" = drop ]; then
+			uci -q delete "$_dm.av_doh_saved"
+		fi
 	done
-	uci commit dhcp || return 1
+	[ "$_any" = 1 ] && uci commit dhcp
+	return 0
+}
+
+dns_doh_restore() {
+	_have_proxy=0
+	[ -f "$DNS_DOH_STATE/proxy.uci" ] && _have_proxy=1
+	_saved=0
+	dns_doh_have_markers && _saved=1
+	# 没有备份也没有接管标记时什么都不做。
+	# 但只剩 dnsmasq 标记（proxy.uci 被手工删掉）也要恢复，否则上游永远停在
+	# 127.0.0.1#5053，而代理根本没在跑。
+	[ "$_have_proxy" = 1 ] || [ "$_saved" = 1 ] || [ -f "$DNS_DOH_STATE/active" ] || return 0
+	if [ -x "$DNS_DOH_INIT" ]; then
+		"$DNS_DOH_INIT" stop || return 1
+	fi
+	rm -f "$DNS_DOH_STATE/active"
+	dns_doh_restore_dnsmasq drop || return 1
 	if [ "$_have_proxy" = 1 ]; then
 		uci import https-dns-proxy < "$DNS_DOH_STATE/proxy.uci" || return 1
 		uci commit https-dns-proxy || return 1
@@ -162,30 +243,9 @@ dns_doh_apply() {
 	[ -x "$DNS_DOH_INIT" ] || { log '缺少 https-dns-proxy，请安装套件依赖'; return 1; }
 	_dm_sections=$(dnsmasq_sections)
 	[ -n "$_dm_sections" ] || { log '找不到 dnsmasq UCI 配置'; return 1; }
-	if [ ! -f "$DNS_DOH_STATE/proxy.uci" ]; then
-		# 先停止原服务，让它恢复自身保存的 dnsmasq 配置，再保存接管前状态。
-		(umask 077; mkdir -p "$DNS_DOH_STATE") || return 1
-		"$DNS_DOH_INIT" enabled && touch "$DNS_DOH_STATE/enabled"
-		"$DNS_DOH_INIT" status >/dev/null 2>&1 && touch "$DNS_DOH_STATE/running"
-		"$DNS_DOH_INIT" stop || return 1
-		(umask 077; uci export https-dns-proxy > "$DNS_DOH_STATE/proxy.uci.tmp") || return 1
-		mv "$DNS_DOH_STATE/proxy.uci.tmp" "$DNS_DOH_STATE/proxy.uci" || return 1
-	fi
+	rm -f "$DNS_DOH_STATE/active"
+	dns_doh_save_original || return 1
 	for _dm in $_dm_sections; do
-		if [ "$(uci -q get "$_dm.av_doh_saved")" != 1 ]; then
-			for _opt in noresolv server serversfile; do
-				if _old=$(uci -q get "$_dm.$_opt"); then
-					uci set "$_dm.av_doh_${_opt}_present=1" || return 1
-					if [ "$_opt" = server ]; then
-						for _srv in $_old; do uci add_list "$_dm.av_doh_server=$_srv" || return 1; done
-					else
-						uci set "$_dm.av_doh_$_opt=$_old" || return 1
-					fi
-				fi
-			done
-			uci set "$_dm.av_doh_saved=1" || return 1
-			uci commit dhcp || return 1
-		fi
 		uci set "$_dm.noresolv=1" || return 1
 		uci -q delete "$_dm.server"
 		uci -q delete "$_dm.serversfile"
@@ -211,7 +271,10 @@ EOF
 	"$DNS_DOH_INIT" restart || { log 'DoH 代理启动失败'; return 1; }
 	_doh_wait=0
 	while [ "$_doh_wait" -lt 5 ]; do
-		netstat -lnu 2>/dev/null | grep -qE '127\.0\.0\.1:5053[[:space:]]' && return 0
+		if netstat -lnu 2>/dev/null | grep -qE '127\.0\.0\.1:5053[[:space:]]'; then
+			: > "$DNS_DOH_STATE/active"
+			return 0
+		fi
 		sleep 1
 		_doh_wait=$((_doh_wait + 1))
 	done
@@ -227,12 +290,59 @@ EOF
 #   dns_doh_after_auth  - 认证并验证在线后切到 DoH；切换失败或解析测试不过
 #                         就立即回退，避免把整台路由器的 DNS 弄死。
 
+# 认证前把 DNS 真正拉回明文。
+#
+# 不能直接复用 dns_doh_restore：它恢复的是“接管前”的 https-dns-proxy 配置。
+# 如果用户原本就装着一套 force_dns=1 / dnsmasq_config_update='*' 的 DoH
+# （例如 Cloudflare/Google），restore 会把这套配置和代理一起启动，dnsmasq
+# 又被拉回 127.0.0.1#5053/5054，认证探测继续 HTTP 000，形成死循环。
+#
+# 认证前只做三件事：停代理、保留原始快照、把 dnsmasq 的本地 DoH 上游清掉。
+dns_doh_pause() {
+	dns_doh_save_original || return 1
+	if [ -x "$DNS_DOH_INIT" ]; then
+		"$DNS_DOH_INIT" stop || return 1
+		"$DNS_DOH_INIT" disable || return 1
+	fi
+	rm -f "$DNS_DOH_STATE/active"
+	_changed=0
+	if dns_doh_have_markers; then
+		dns_doh_restore_dnsmasq keep || return 1
+		_changed=1
+	fi
+	for _dm in $(dnsmasq_sections); do
+		if [ "$(uci -q get "$_dm.noresolv")" = 1 ]; then
+			uci -q delete "$_dm.noresolv" || return 1
+			_changed=1
+		fi
+		_servers=$(uci -q get "$_dm.server") || _servers=""
+		_kept=""
+		_removed=0
+		for _srv in $_servers; do
+			case "$_srv" in
+				127.0.0.1#5053|127.0.0.1#5054|::1#5053|::1#5054) _removed=1 ;;
+				*) _kept="$_kept $_srv" ;;
+			esac
+		done
+		if [ "$_removed" = 1 ]; then
+			uci -q delete "$_dm.server" || return 1
+			for _srv in $_kept; do uci add_list "$_dm.server=$_srv" || return 1; done
+			_changed=1
+		fi
+	done
+	if [ "$_changed" = 1 ]; then
+		uci commit dhcp || return 1
+		dns_restart_dnsmasq
+	fi
+	return 0
+}
+
 dns_doh_before_auth() {
 	[ "$(av_cfg_bool dns enabled 0)" = "1" ] || return 0
 	[ "$(dns_doh_mode)" = "post_auth" ] || return 0
-	dns_doh_active || return 0
-	if dns_doh_restore; then
-		dns_restart_dnsmasq
+	# 已经是明文上游时不要反复 stop/restart，认证重试可能每几十秒一次。
+	dns_doh_plain_ready && return 0
+	if dns_doh_pause; then
 		log '需要认证, 已恢复明文 DNS 上游'
 		return 0
 	fi
@@ -250,8 +360,7 @@ dns_doh_after_auth() {
 
 	if ! dns_doh_apply; then
 		log '认证后启用 DoH 失败, 已回退明文上游'
-		dns_doh_restore
-		dns_restart_dnsmasq
+		dns_doh_pause || log '回退明文 DNS 失败'
 		dns_doh_mark_fail
 		return 1
 	fi
@@ -259,8 +368,7 @@ dns_doh_after_auth() {
 	sleep 1
 	if ! dns_query_ok; then
 		log 'DoH 已启动但解析测试失败, 已回退明文上游'
-		dns_doh_restore
-		dns_restart_dnsmasq
+		dns_doh_pause || log '回退明文 DNS 失败'
 		dns_doh_mark_fail
 		return 1
 	fi

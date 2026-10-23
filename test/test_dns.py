@@ -126,6 +126,37 @@ esac
     def db(self):
         return json.loads(self.db_path.read_text())
 
+    def dns_db(self):
+        """UCI 数据库去掉 autoverify 自己的字段和 dnsmasq 备份标记。"""
+        return {k: v for k, v in self.db().items()
+                if not k.startswith('autoverify.') and '.av_doh_' not in k}
+
+    def dnsmasq_db(self):
+        """只比较 dnsmasq 配置；认证前暂停时 https-dns-proxy 运行时配置仍是
+        autoverify 自己的那一份（原始配置保存在 proxy.uci，故意不恢复）。"""
+        return {k: v for k, v in self.dns_db().items() if k.startswith('dhcp.')}
+
+    def initial_dnsmasq(self):
+        return {k: v for k, v in self.initial.items() if k.startswith('dhcp.')}
+
+    def use_hijacked_initial(self):
+        """模拟接管前 dnsmasq 已经被另一套 https-dns-proxy 抢占。"""
+        hijacked = {
+            'dhcp.@dnsmasq[0]': 'dnsmasq',
+            'dhcp.@dnsmasq[0].noresolv': '1',
+            'dhcp.@dnsmasq[0].server': ['127.0.0.1#5053', '127.0.0.1#5054'],
+            'dhcp.lan': 'dhcp',
+            'https-dns-proxy.config': 'main',
+            'https-dns-proxy.config.force_dns': '1',
+            'https-dns-proxy.config.dnsmasq_config_update': '*',
+            'https-dns-proxy.old': 'https-dns-proxy',
+            'https-dns-proxy.old.resolver_url': 'https://cloudflare-dns.com/dns-query',
+            'https-dns-proxy.old.listen_port': '5053',
+        }
+        self.db_path.write_text(json.dumps(hijacked))
+        self.initial = hijacked
+        return hijacked
+
     def run_apply(self, enabled='1', redirect=None, mode='always'):
         db = self.db()
         db['autoverify.dns.enabled'] = enabled
@@ -278,15 +309,21 @@ apply_dns() {''' + function + '\napply_dns')
         self.assertEqual(self.db(), self.initial)
 
     def test_post_auth_switches_after_auth_and_restores_before_auth(self):
-        # 认证前: 明文上游。认证成功后切 DoH；再次认证前恢复。
+        # 认证前: 明文上游。认证成功后切 DoH；再次认证前恢复明文。
         self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
         self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
         self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertTrue((self.root / 'state/active').exists())
         # 幂等: 已接管时不再重复 apply / restart。
         self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
         self.assertEqual(self.run_shell('dns_doh_before_auth').returncode, 0)
-        self.assertEqual(self.db(), self.initial)
-        self.assertFalse((self.root / 'state/proxy.uci').exists())
+        self.assertEqual(self.dnsmasq_db(), self.initial_dnsmasq())
+        # 认证前暂停只停代理，不丢原始快照；认证成功后还能再次接管。
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertFalse((self.root / 'state/active').exists())
+        self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
+        self.assertTrue((self.root / 'state/active').exists())
 
     def test_post_auth_skips_when_https_blocked(self):
         self.env['DNS_TEST_HTTPS'] = '000'
@@ -297,11 +334,14 @@ apply_dns() {''' + function + '\napply_dns')
     def test_post_auth_rolls_back_when_dns_query_fails(self):
         self.env['DNS_TEST_QUERY'] = '0'
         self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
-        self.assertEqual(self.db(), self.initial)
-        self.assertFalse((self.root / 'state/proxy.uci').exists())
+        self.assertEqual(self.dnsmasq_db(), self.initial_dnsmasq())
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertFalse((self.root / 'state/active').exists())
         self.assertTrue((self.root / 'state/fail').exists())
         calls = (self.root / 'calls').read_text().splitlines()
         self.assertIn('stop', calls)
+        # 回退是明文，不能把原来的 https-dns-proxy 配置启动起来。
+        self.assertNotIn('start', calls)
 
     def test_post_auth_cooldown_skips_retry(self):
         self.env['DNS_TEST_QUERY'] = '0'
@@ -310,7 +350,9 @@ apply_dns() {''' + function + '\napply_dns')
         self.env['DNS_TEST_HTTPS'] = '200'
         # 失败标记在冷却期内，即使条件恢复也不再重启 dnsmasq。
         self.assertNotEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
-        self.assertEqual(self.db(), self.initial)
+        self.assertEqual(self.dnsmasq_db(), self.initial_dnsmasq())
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertFalse((self.root / 'state/active').exists())
 
     def test_always_mode_never_defers(self):
         self.assertEqual(self.run_shell('dns_doh_after_auth', mode='always').returncode, 0)
@@ -335,8 +377,70 @@ apply_dns() {''' + function + '\napply_dns')
         self.assertEqual(self.run_apply(mode='always').returncode, 0)
         self.assertEqual(self.db()['dhcp.other.server'], ['127.0.0.1#5053'])
         self.assertEqual(self.run_apply(mode='post_auth').returncode, 0)
-        restored = {k: v for k, v in self.db().items() if not k.startswith('autoverify.')}
-        self.assertEqual(restored, self.initial)
+        self.assertEqual(self.dnsmasq_db(), self.initial_dnsmasq())
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+
+    def test_post_auth_pauses_foreign_doh_hijack(self):
+        # 关键回归: 接管前 dnsmasq 已经指向本机 5053/5054，且 https-dns-proxy
+        # 自己的配置是 force_dns=1 + Cloudflare/Google。认证前必须真正回到明文，
+        # 不能把这份原始配置和代理一起启动，否则又是 HTTP 000 死循环。
+        self.use_hijacked_initial()
+
+        result = self.run_shell('dns_doh_before_auth')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        db = self.db()
+        self.assertNotEqual(db.get('dhcp.@dnsmasq[0].noresolv'), '1')
+        self.assertNotIn('127.0.0.1#5053', db.get('dhcp.@dnsmasq[0].server', []))
+        self.assertNotIn('127.0.0.1#5054', db.get('dhcp.@dnsmasq[0].server', []))
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertTrue((self.root / 'state/enabled').exists())
+        self.assertTrue((self.root / 'state/running').exists())
+        self.assertFalse((self.root / 'state/active').exists())
+        calls = (self.root / 'calls').read_text().splitlines()
+        self.assertIn('stop', calls)
+        self.assertIn('disable', calls)
+        self.assertNotIn('start', calls)
+
+        # 认证成功后切回 autoverify 自己的 doh.pub。
+        self.assertEqual(self.run_shell('dns_doh_after_auth').returncode, 0)
+        db = self.db()
+        self.assertEqual(db['dhcp.@dnsmasq[0].server'], ['127.0.0.1#5053'])
+        self.assertEqual(db['https-dns-proxy.autoverify.resolver_url'],
+                         'https://doh.pub/dns-query')
+        self.assertTrue((self.root / 'state/active').exists())
+
+        # 下一次认证前再次暂停，仍然不能启动原来的 Cloudflare/Google 配置。
+        before = len((self.root / 'calls').read_text().splitlines())
+        self.assertEqual(self.run_shell('dns_doh_before_auth').returncode, 0)
+        db = self.db()
+        self.assertNotEqual(db.get('dhcp.@dnsmasq[0].noresolv'), '1')
+        self.assertNotIn('127.0.0.1#5053', db.get('dhcp.@dnsmasq[0].server', []))
+        self.assertFalse((self.root / 'state/active').exists())
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertNotIn('start', (self.root / 'calls').read_text().splitlines()[before:])
+
+        # 只有真正关闭 DNS 管理时才完整恢复原始状态并启动原代理。
+        self.assertEqual(self.run_shell('dns_doh_restore').returncode, 0)
+        db = self.db()
+        self.assertEqual(db.get('dhcp.@dnsmasq[0].noresolv'), '1')
+        self.assertEqual(db.get('dhcp.@dnsmasq[0].server'),
+                         ['127.0.0.1#5053', '127.0.0.1#5054'])
+        self.assertEqual(db.get('https-dns-proxy.old.resolver_url'),
+                         'https://cloudflare-dns.com/dns-query')
+        self.assertIn('start', (self.root / 'calls').read_text().splitlines())
+        self.assertFalse((self.root / 'state/proxy.uci').exists())
+
+    def test_post_auth_apply_pauses_foreign_hijack(self):
+        # autoverify-apply 启动路径也必须走暂停，而不是完整恢复。
+        self.use_hijacked_initial()
+        result = self.run_apply(mode='post_auth')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        db = self.db()
+        self.assertNotEqual(db.get('dhcp.@dnsmasq[0].noresolv'), '1')
+        self.assertNotIn('127.0.0.1#5053', db.get('dhcp.@dnsmasq[0].server', []))
+        self.assertTrue((self.root / 'state/proxy.uci').exists())
+        self.assertFalse((self.root / 'state/active').exists())
+        self.assertNotIn('start', (self.root / 'calls').read_text().splitlines())
 
 
 if __name__ == '__main__':

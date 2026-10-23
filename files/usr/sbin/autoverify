@@ -750,6 +750,8 @@ follow_next_page() {
 run_once() {
 	if check_online; then
 		# 已在线也补一次切换: 开机时会话可能仍然有效, 或刚从 always 模式升级过来。
+		# 顺便把上次失败留下的状态刷新掉，避免 status 一直显示旧的 E_* 错误。
+		av_state_online manual once "$PROBE_CODE"
 		dns_doh_after_auth
 		logv "在线, 无需认证"
 		return 0
@@ -784,6 +786,8 @@ run_daemon() {
 	while :; do
 		if check_online; then
 			# 幂等: 已接管时直接返回。开机/重载后会在这里补切。
+			# 在线轮询只在状态变化时写 /var/run，不写闪存。
+			av_state_online daemon daemon "$PROBE_CODE"
 			dns_doh_after_auth
 			logv "在线"
 			_delay="$RETRY_INTERVAL"
@@ -1045,10 +1049,19 @@ load_status_snapshot() {
 	STATUS_LOCK_PID=$(av_state_get "$STATUS_FILE" lock_pid)
 	[ -n "$STATUS_STATE" ] || STATUS_STATE=unknown
 	[ -n "$STATUS_RESULT" ] || STATUS_RESULT=unknown
-	_daemon_pids=$(pidof autoverify 2>/dev/null || true)
-	STATUS_DAEMON_PID=$(printf '%s\n' "$_daemon_pids" | awk '{print $1}')
-	STATUS_DAEMON_COUNT=$(printf '%s\n' "$_daemon_pids" | awk '{print NF}')
-	[ -n "$STATUS_DAEMON_COUNT" ] || STATUS_DAEMON_COUNT=0
+	# pidof autoverify 也会匹配 `autoverify status` 自己，导致 PID/数量虚高。
+	# 只认 cmdline 里第二个参数是 daemon 的进程。
+	_daemon_pids=""
+	for _p in $(pidof autoverify 2>/dev/null); do
+		_args=$(tr '\000' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
+		case "$_args" in
+			*" daemon"|*" daemon ") _daemon_pids="$_daemon_pids $_p" ;;
+		esac
+	done
+	_daemon_pids=${_daemon_pids# }
+	STATUS_DAEMON_PID=${_daemon_pids%% *}
+	STATUS_DAEMON_COUNT=0
+	[ -n "$_daemon_pids" ] && set -- $_daemon_pids && STATUS_DAEMON_COUNT=$#
 	AUTH_LOCK_DIR="$LOCK_ROOT/auth.lock.d"
 	if [ -r "$AUTH_LOCK_DIR/owner" ]; then
 		STATUS_LOCK_PID=$(av_state_get "$AUTH_LOCK_DIR/owner" pid)
